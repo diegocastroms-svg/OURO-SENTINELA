@@ -1,136 +1,189 @@
-import os, asyncio, aiohttp, time, threading
+import os, asyncio, aiohttp, time, threading, statistics
 from datetime import datetime, timedelta
 from flask import Flask
 
 # =========================
-# CONFIGURAÇÃO (padrões)
+# CONFIGURAÇÃO (via Env)
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "60"))               # quantos pares analisar por volume
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))  # segundos entre varreduras
-COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN", "30"))    # min sem repetir alerta do mesmo par
+TOP_N = int(os.getenv("TOP_N", "60"))                 # quantos pares (USDT) por volume 24h
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "120"))# segundos entre varreduras
+COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN", "45"))   # min sem repetir alerta daquele par
+MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "5000000"))  # liquidez mínima 24h (USDT)
 
-# Critérios de PRÉ-PUMP (ajuste fino aqui)
-VOL_SPIKE_MULT = float(os.getenv("VOL_SPIKE_MULT", "3.0"))     # volume da vela atual vs mediana 20
-BOOK_IMBALANCE = float(os.getenv("BOOK_IMBALANCE", "1.6"))     # soma(bids)/soma(asks) (top 20 níveis)
-GAP_PCT = float(os.getenv("GAP_PCT", "0.35")) / 100.0          # gap mínimo entre close→open (1m)
-MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "2000000"))       # filtro de liquidez (24h quote volume)
+# Critérios de confirmação de TENDÊNCIA
+MIN_FORCE = int(os.getenv("MIN_FORCE", "70"))         # força mínima (0–100) para alertar
+BOOK_MIN_BUY = float(os.getenv("BOOK_MIN_BUY", "1.30"))   # ratio bids/asks mínimo para alta
+BOOK_MIN_SELL = float(os.getenv("BOOK_MIN_SELL", "0.77")) # ratio bids/asks máximo para baixa
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
-PAIRS = os.getenv("PAIRS", "").strip()  # se vazio, analisa todos os símbolos
+PAIRS = os.getenv("PAIRS", "").strip()  # se vazio, o scanner decide pelo Top N por volume
 
 # =========================
-# APP WEB (Render health)
+# APP WEB (saúde no Render)
 # =========================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "OURO SENTINELA – Pré-pump ativo", 200
+    return "OURO-TENDÊNCIA v1.0 – Online", 200
 
 @app.route("/health")
 def health():
     return "OK", 200
 
-
 # =========================
 # UTILITÁRIOS
 # =========================
-async def send_telegram(text: str):
+def br_time():
+    # Apenas rótulo visual; Render roda em UTC. Ajuste visual local.
+    return datetime.now().strftime("%H:%M:%S")
+
+def fmt_m(v):
+    return f"{v/1_000_000:.1f}M"
+
+async def send_telegram(message: str):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("⚠️ Faltando TELEGRAM_TOKEN ou CHAT_ID")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text}
+    payload = {"chat_id": CHAT_ID, "text": message}
     async with aiohttp.ClientSession() as s:
         await s.post(url, data=payload)
 
-def fmt_m(val):
-    return f"{val/1_000_000:.1f}M"
-
-def now_hms():
-    return datetime.now().strftime("%H:%M:%S")
-
-
-# =========================
-# BINANCE CLIENT (aiohttp)
-# =========================
-async def get_json(session, url, params=None):
+async def get_json(session, url, params=None, timeout=15):
     for _ in range(2):
         try:
-            async with session.get(url, params=params, timeout=15) as r:
+            async with session.get(url, params=params, timeout=timeout) as r:
                 return await r.json()
-        except Exception as e:
-            await asyncio.sleep(0.5)
-    raise RuntimeError(f"Erro ao buscar {url}")
+        except Exception:
+            await asyncio.sleep(0.4)
+    raise RuntimeError(f"Falha ao obter {url}")
 
+# =========================
+# DATA: Binance endpoints
+# =========================
 async def fetch_24hr(session):
     return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
 
-async def fetch_klines_1m(session, symbol, limit=60):
-    return await get_json(session, f"{BINANCE}/api/v3/klines", {"symbol": symbol, "interval": "1m", "limit": limit})
+async def fetch_klines(session, symbol, interval="5m", limit=120):
+    return await get_json(session, f"{BINANCE}/api/v3/klines",
+                          {"symbol": symbol, "interval": interval, "limit": limit})
 
-async def fetch_depth(session, symbol, limit=20):
-    return await get_json(session, f"{BINANCE}/api/v3/depth", {"symbol": symbol, "limit": limit})
-
+async def fetch_depth(session, symbol, limit=40):
+    return await get_json(session, f"{BINANCE}/api/v3/depth",
+                          {"symbol": symbol, "limit": limit})
 
 # =========================
-# LÓGICA DE SINAIS PRÉ-PUMP
+# INDICADORES (5m)
 # =========================
-from statistics import median
+def ema(values, period):
+    if not values: return 0.0
+    k = 2 / (period + 1)
+    e = float(values[0])
+    for v in values[1:]:
+        e = float(v) * k + e * (1 - k)
+    return e
 
-def volume_spike(klines):
-    """Retorna (bool, mult, vol_atual) comparando volume atual vs mediana das últimas 20 velas."""
-    vols = [float(k[5]) for k in klines[:-1]]  # exclui a vela em formação
-    if len(vols) < 20:
-        return False, 0.0, 0.0
-    base = median(vols[-20:])
-    atual = float(klines[-1][5])
-    if base <= 0:
-        return False, 0.0, atual
-    mult = atual / base
-    return mult >= VOL_SPIKE_MULT, mult, atual
+def macd(values, fast=12, slow=26, signal=9):
+    if len(values) < slow + signal:  # segurança
+        return 0.0, 0.0
+    # Para suavizar, calcule EMAs na cauda necessária
+    slow_slice = values[-(slow+signal+3):]
+    ema_fast = ema(slow_slice, fast)
+    ema_slow = ema(slow_slice, slow)
+    macd_line = ema_fast - ema_slow
+    sig = ema([ema_fast - ema_slow for _ in range(signal)], signal)  # aproximação leve
+    hist = macd_line - sig
+    return macd_line, hist
 
-def gap_detect(klines):
-    """Gap entre close anterior e open atual."""
-    if len(klines) < 2: 
-        return False, 0.0
-    prev_close = float(klines[-2][4])
-    curr_open = float(klines[-1][1])
-    if prev_close == 0: 
-        return False, 0.0
-    pct = abs(curr_open - prev_close) / prev_close
-    return pct >= GAP_PCT, pct
+def rsi(values, period=14):
+    if len(values) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(values)):
+        diff = values[i] - values[i-1]
+        gains.append(max(diff, 0))
+        losses.append(-min(diff, 0))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period or 1e-9
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-def book_imbalance(depth):
-    """Soma preço*quantidade top20 em bids/asks e calcula razão."""
-    def side_power(levels):
+def book_ratio(depth):
+    """Soma preço*qtd nos 20 níveis de bids/asks."""
+    def power(levels):
         total = 0.0
         for p, q in levels[:20]:
             total += float(p) * float(q)
         return total
-    b = side_power(depth.get("bids", []))
-    a = side_power(depth.get("asks", []))
-    if a <= 0:
-        return False, 0.0
-    ratio = b / a
-    return ratio >= BOOK_IMBALANCE, ratio
+    b = power(depth.get("bids", []))
+    a = power(depth.get("asks", []))
+    if a <= 0: return 0.0
+    return b / a
 
+# =========================
+# AVALIAÇÃO DE TENDÊNCIA
+# =========================
+def calc_force(ema9, ema20, macd_line, hist, rsi_val, ratio):
+    score = 0
+    # direção/estrutura
+    if ema9 > ema20: score += 25
+    if macd_line > 0 and hist > 0: score += 25
+    if 45 < rsi_val < 65: score += 20
+    # fluxo (book)
+    if ratio >= BOOK_MIN_BUY: score += 30
+    if ema9 < ema20 or macd_line < 0:
+        # em baixa também pode haver força, mas aqui focamos em compras
+        if ratio <= BOOK_MIN_SELL: score = max(score, 65)  # concede força para baixa confirmada
+    return min(score, 100)
+
+def decide_direction(ema9, ema20, macd_line):
+    if ema9 > ema20 and macd_line > 0: return "alta"
+    if ema9 < ema20 and macd_line < 0: return "baixa"
+    return "neutra"
+
+def build_alert(symbol, direction, force, ema9, ema20, macd_line, hist, rsi_val, ratio, vol_mult):
+    hora = br_time()
+    seta = "🔺" if direction == "alta" else "🔻" if direction == "baixa" else "⚪"
+    tend = ("Tendência de Alta Confirmada" if direction=="alta"
+            else "Tendência de Baixa Confirmada" if direction=="baixa"
+            else "Tendência em Formação")
+    insight = ("fluxo comprador consistente — manter enquanto RSI < 70 e EMA9>EMA20"
+               if direction=="alta" and force>=MIN_FORCE else
+               "fluxo vendedor consistente — manter enquanto EMA9<EMA20"
+               if direction=="baixa" and force>=MIN_FORCE else
+               "estrutura ganhando força — aguardar confirmação")
+    text = (
+f"🟢🟢🟢🟢\n"
+f"📊 [OURO-TENDÊNCIA | Sinal Estratégico]\n\n"
+f"Ativo: {symbol}\n"
+f"Direção: {seta} {tend}\n"
+f"Força: {force:.0f}% (base técnica + fluxo)\n\n"
+f"📈 Indicadores:\n"
+f"• EMA9 {'>' if ema9>ema20 else '<'} EMA20\n"
+f"• MACD {'+' if macd_line>0 else '-'} | Hist {'↑' if hist>0 else '↓'}\n"
+f"• RSI {rsi_val:.1f}\n"
+f"• Book {ratio:.2f}× {'comprador' if ratio>=1 else 'vendedor'} | Vol 5m {vol_mult:.1f}×\n\n"
+f"🕒 Horário: {hora} (Brasília)\n"
+f"──────────────\n"
+f"📩 Insight: {insight}."
+)
+    return text
 
 # =========================
 # LOOP PRINCIPAL
 # =========================
-cooldown = {}  # symbol -> datetime próximo permitido
+cooldown = {}  # symbol -> datetime (UTC) próximo permitido
 
 async def scan_once():
     async with aiohttp.ClientSession() as session:
-        # 1) pega 24h para ordenar por volume e filtrar liquidez
+        # 1) Seleção de pares
         all24 = await fetch_24hr(session)
-
-        # filtra por USDT e liquidez mínima; aplica PAIRS se fornecido
-        selected = []
         allow = set(PAIRS.split(",")) if PAIRS else None
+
+        pool = []
         for x in all24:
             s = x.get("symbol", "")
             if not s.endswith("USDT"): 
@@ -140,58 +193,72 @@ async def scan_once():
             qv = float(x.get("quoteVolume", 0.0))
             if qv < MIN_QV_USDT:
                 continue
-            selected.append((s, qv))
-        # top N por volume
-        selected = [s for s, _ in sorted(selected, key=lambda t: t[1], reverse=True)[:TOP_N]]
+            pool.append((s, qv))
 
-        # 2) para cada símbolo, pega klines e depth e calcula sinais
+        # ordena por volume e pega TOP_N
+        symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
+
         results = []
-        for sym in selected:
+        for sym in symbols:
             try:
-                kl, dp = await asyncio.gather(
-                    fetch_klines_1m(session, sym, 60),
-                    fetch_depth(session, sym, 50)
+                kl_5m, depth = await asyncio.gather(
+                    fetch_klines(session, sym, "5m", 120),
+                    fetch_depth(session, sym, 40)
                 )
-                ok_vol, mult, vol_atual = volume_spike(kl)
-                ok_gap, gapv = gap_detect(kl)
-                ok_book, ratio = book_imbalance(dp)
-                if ok_vol or ok_gap or ok_book:
-                    results.append((sym, ok_vol, mult, vol_atual, ok_gap, gapv, ok_book, ratio))
+                closes = [float(k[4]) for k in kl_5m]
+                vols   = [float(k[5]) for k in kl_5m]
+                if len(closes) < 40: 
+                    await asyncio.sleep(0.03); 
+                    continue
+
+                # Indicadores
+                ema9 = ema(closes[-40:], 9)
+                ema20 = ema(closes[-40:], 20)
+                macd_line, hist = macd(closes)
+                rsi_val = rsi(closes)
+
+                # Volume 5m vs mediana 10 velas
+                base = statistics.median(vols[-11:-1]) if len(vols) >= 12 else (sum(vols[-6:-1])/5 if len(vols)>=6 else 1)
+                vol_mult = vols[-1] / (base or 1)
+
+                # Book ratio
+                ratio = book_ratio(depth)
+
+                # Decisão e força
+                direction = decide_direction(ema9, ema20, macd_line)
+                force = calc_force(ema9, ema20, macd_line, hist, rsi_val, ratio)
+
+                # Regras de disparo
+                ok_high = (direction == "alta" and ratio >= BOOK_MIN_BUY and force >= MIN_FORCE)
+                ok_low  = (direction == "baixa" and ratio <= BOOK_MIN_SELL and force >= MIN_FORCE)
+
+                if ok_high or ok_low:
+                    results.append((sym, direction, force, ema9, ema20, macd_line, hist, rsi_val, ratio, vol_mult))
+
                 await asyncio.sleep(0.05)  # respeito leve ao rate limit
             except Exception as e:
-                # silencia erros pontuais para não travar o loop
+                # silencioso para não travar a varredura
                 pass
 
-        # 3) envia alertas com cooldown
+        # 3) Envio com cooldown
         now = datetime.utcnow()
         msgs = []
-        for (sym, ok_vol, mult, vol_atual, ok_gap, gapv, ok_book, ratio) in results:
+        for (sym, direction, force, ema9, ema20, macd_line, hist, rsi_val, ratio, vol_mult) in results:
             next_ok = cooldown.get(sym, datetime.min)
             if now < next_ok:
                 continue
-            sinais = []
-            if ok_vol:  sinais.append(f"Volume ↑ {mult:.1f}x ({fmt_m(vol_atual)})")
-            if ok_book: sinais.append(f"Book compr. {ratio:.2f}x")
-            if ok_gap:  sinais.append(f"Gap 1m {gapv*100:.2f}%")
-            if not sinais:
-                continue
-            texto = (
-                "⚡ OURO SENTINELA — ALERTA PRÉ-PUMP ⚡\n"
-                f"Par: {sym}\n"
-                f"{' | '.join(sinais)}\n"
-                f"Hora: {now_hms()}"
-            )
-            msgs.append(texto)
+            msg = build_alert(sym, direction, force, ema9, ema20, macd_line, hist, rsi_val, ratio, vol_mult)
+            msgs.append(msg)
             cooldown[sym] = now + timedelta(minutes=COOLDOWN_MIN)
 
-        # envia (limite básico: até 10 mensagens por ciclo)
-        for m in msgs[:10]:
+        # Limite de mensagens por ciclo para evitar flood
+        for m in msgs[:5]:
             print(m.replace("\n", " | "))
             await send_telegram(m)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.25)
 
 async def monitor_loop():
-    print("🚀 OURO SENTINELA (PRÉ-PUMP) iniciado.")
+    print("🚀 OURO-TENDÊNCIA v1.0 iniciado.")
     while True:
         try:
             await scan_once()
@@ -200,9 +267,8 @@ async def monitor_loop():
             print("⚠️ Erro no loop:", e)
             await asyncio.sleep(5)
 
-# ========= INÍCIO PARA RENDER =========
+# ========= ENTRYPOINT (Render) =========
 if __name__ == "__main__":
-    # sobe Flask numa thread e roda o loop assíncrono no main
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))).start()
     time.sleep(2)
     asyncio.run(monitor_loop())
