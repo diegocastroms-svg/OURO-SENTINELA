@@ -42,7 +42,7 @@ async def monitor_loop():
                     continue
                 price_change = float(coin["priceChangePercent"])
                 volume = float(coin["quoteVolume"])
-                if price_change >= 5 and volume > 10000000:
+                if price_change >= 3 and volume > 2000000:
                     msg = f"💥 {s} em alta de {price_change:.1f}%\nVolume: {volume/1_000_000:.1f}M\nHora: {agora}"
                     print(msg)
                     await send_telegram(msg)
