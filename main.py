@@ -1,7 +1,6 @@
-import os, asyncio, aiohttp, time
+import os, asyncio, aiohttp, time, threading
 from datetime import datetime
 from flask import Flask
-import threading
 
 app = Flask(__name__)
 
@@ -17,9 +16,10 @@ def health():
 BINANCE_API = "https://api.binance.com/api/v3/ticker/24hr"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
-PAIRS = os.getenv("PAIRS", "BTCUSDT,ETHUSDT").split(",")
+PAIRS = os.getenv("PAIRS", "").split(",")
 
 async def send_telegram(message):
+    """Envia alerta para o Telegram"""
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("⚠️ Faltando TELEGRAM_TOKEN ou CHAT_ID")
         return
@@ -28,6 +28,7 @@ async def send_telegram(message):
         await session.post(url, data={"chat_id": CHAT_ID, "text": message})
 
 async def monitor_loop():
+    """Loop principal de varredura de mercado"""
     print("🚀 OURO SENTINELA iniciado.")
     while True:
         try:
@@ -36,26 +37,29 @@ async def monitor_loop():
                     data = await resp.json()
 
             agora = datetime.now().strftime("%H:%M:%S")
+
             for coin in data:
                 s = coin["symbol"]
-                if s not in PAIRS:
+                if PAIRS != [""] and s not in PAIRS:
                     continue
                 price_change = float(coin["priceChangePercent"])
                 volume = float(coin["quoteVolume"])
-                if price_change >= 3 and volume > 2000000:
+
+                # condição ajustada: detectar pumps mais cedo
+                if price_change >= 3 and volume > 2_000_000:
                     msg = f"💥 {s} em alta de {price_change:.1f}%\nVolume: {volume/1_000_000:.1f}M\nHora: {agora}"
                     print(msg)
                     await send_telegram(msg)
+
             await asyncio.sleep(60)
+
         except Exception as e:
-            print("Erro no loop:", e)
+            print("⚠️ Erro no loop:", e)
             await asyncio.sleep(10)
 
-def run_async():
-    loop = asyncio.get_event_loop()
-    loop.create_task(monitor_loop())
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))).start()
-    loop.run_forever()
 
 if __name__ == "__main__":
-    run_async()
+    # inicia o Flask e o monitor em paralelo
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))).start()
+    time.sleep(2)
+    asyncio.run(monitor_loop())
