@@ -6,11 +6,11 @@ from flask import Flask
 # CONFIGURAÇÃO (versão equilibrada)
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "30"))                  
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180")) 
-COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN", "90"))    
+TOP_N = int(os.getenv("TOP_N", "30"))
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
+COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN", "90"))
 MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))
-MIN_FORCE = int(os.getenv("MIN_FORCE", "90"))          
+MIN_FORCE = int(os.getenv("MIN_FORCE", "90"))
 BOOK_MIN_BUY = float(os.getenv("BOOK_MIN_BUY", "1.55"))
 BOOK_MIN_SELL = float(os.getenv("BOOK_MIN_SELL", "0.65"))
 
@@ -44,7 +44,7 @@ async def get_json(session, url, params=None, timeout=15):
                 return await r.json()
         except:
             await asyncio.sleep(0.4)
-    raise RuntimeError(f"Erro em {url}")
+    return None
 
 async def fetch_24hr(session):
     return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
@@ -54,7 +54,8 @@ async def fetch_klines(session, sym, interval="5m", limit=120):
                           {"symbol": sym, "interval": interval, "limit": limit})
 
 async def fetch_depth(session, sym, limit=40):
-    return await get_json(session, f"{BINANCE}/api/v3/depth", {"symbol": sym, "limit": limit})
+    return await get_json(session, f"{BINANCE}/api/v3/depth",
+                          {"symbol": sym, "limit": limit})
 
 # =========================
 # INDICADORES
@@ -102,7 +103,7 @@ def bollinger_width(closes, period=20):
     return ((up - dn) / mean) * 100 if mean != 0 else 0
 
 # =========================
-# LOOP PRINCIPAL (ESTRUTURA MANTIDA)
+# LOOP PRINCIPAL
 # =========================
 cooldown = {}
 
@@ -110,6 +111,9 @@ async def scan_once():
     async with aiohttp.ClientSession() as s:
 
         all24 = await fetch_24hr(s)
+        if not all24:
+            return
+
         allow = set(PAIRS.split(",")) if PAIRS else None
 
         pool = [(x["symbol"], float(x["quoteVolume"])) for x in all24
@@ -125,6 +129,9 @@ async def scan_once():
                     fetch_klines(s, sym, "5m", 120),
                     fetch_depth(s, sym, 40)
                 )
+
+                if not kl or not dp:
+                    continue
 
                 closes = [float(k[4]) for k in kl]
                 vols = [float(k[5]) for k in kl]
@@ -142,7 +149,7 @@ async def scan_once():
                 ratio = book_ratio(dp)
                 bw = bollinger_width(closes)
 
-                data_row = [
+                row = [
                     br_time(),
                     sym,
                     closes[-1],
@@ -160,7 +167,9 @@ async def scan_once():
 
                 with open("dados_coletados.csv", "a", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow(data_row)
+                    writer.writerow(row)
+
+                print(f"[{br_time()}] COLETADO: {sym}")
 
                 await asyncio.sleep(0.05)
 
@@ -168,7 +177,7 @@ async def scan_once():
                 print("Erro:", e)
 
 async def monitor_loop():
-    print("🚀 OURO-TENDÊNCIA v1.2 equilibrado ativo (COLETANDO PADRÕES).")
+    print("🚀 OURO-TENDÊNCIA v1.2 – COLETANDO PADRÕES (ativo).")
     while True:
         try:
             await scan_once()
@@ -179,7 +188,8 @@ async def monitor_loop():
 
 if __name__ == "__main__":
     threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+        target=lambda: app.run(host="0.0.0.0",
+        port=int(os.getenv("PORT", 10000)))
     ).start()
     time.sleep(2)
     asyncio.run(monitor_loop())
