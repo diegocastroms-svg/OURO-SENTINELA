@@ -8,15 +8,19 @@ from flask import Flask
 BINANCE = "https://api.binance.com"
 TOP_N = int(os.getenv("TOP_N", "30"))                  # monitora só top-30
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180")) # varredura a cada 3 min
-COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN", "90"))    # 1h30 entre alertas
+COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN", "90"))    # (não usado mais p/ alerta)
 MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))  # liquidez mínima 15 M USDT
-MIN_FORCE = int(os.getenv("MIN_FORCE", "90"))          # força mínima exigida
+MIN_FORCE = int(os.getenv("MIN_FORCE", "90"))          # (não usado mais p/ alerta)
 BOOK_MIN_BUY = float(os.getenv("BOOK_MIN_BUY", "1.55"))    # book comprador forte
 BOOK_MIN_SELL = float(os.getenv("BOOK_MIN_SELL", "0.65"))  # book vendedor forte
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
+
+# arquivos de monitoramento
+LOG_FILE = os.getenv("LOG_FILE", "monitor_ouro_tendencia.log")
+CSV_FILE = os.getenv("CSV_FILE", "monitor_ouro_tendencia.csv")
 
 # =========================
 # APP WEB (Render health)
@@ -25,7 +29,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "OURO-TENDÊNCIA v1.2 – Equilibrado", 200
+    return "OURO-TENDÊNCIA v1.2 – Equilibrado (MODO MONITORAMENTO)", 200
 
 @app.route("/health")
 def health():
@@ -38,11 +42,8 @@ def br_time():
     return datetime.now().strftime("%H:%M:%S")
 
 async def send_telegram(message: str):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    async with aiohttp.ClientSession() as s:
-        await s.post(url, data={"chat_id": CHAT_ID, "text": message})
+    # modo monitoramento: não enviar nada
+    return
 
 async def get_json(session, url, params=None, timeout=15):
     for _ in range(2):
@@ -99,106 +100,87 @@ def book_ratio(depth):
     return b / a if a > 0 else 0
 
 # =========================
-# AVALIAÇÃO DE TENDÊNCIA
+# LOOP PRINCIPAL (MODO MONITOR)
 # =========================
-def calc_force(ema9, ema20, macd_line, hist, rsi_val, ratio):
-    score = 0
-    if ema9 > ema20:
-        score += 15
-    if macd_line > 0 and hist > 0:
-        score += 25
-    if 45 < rsi_val < 65:
-        score += 10
-    if ratio >= BOOK_MIN_BUY:
-        score += 50
-    if ema9 < ema20 and macd_line < 0 and ratio <= BOOK_MIN_SELL:
-        score = max(score, 80)
-    return min(score, 100)
-
-def decide_direction(ema9, ema20, macd_line):
-    if ema9 > ema20 and macd_line > 0:
-        return "alta"
-    if ema9 < ema20 and macd_line < 0:
-        return "baixa"
-    return "neutra"
-
-def build_alert(sym, direction, force, ema9, ema20, macd_line, hist, rsi_val, ratio, vol_mult):
-    hora = br_time()
-    seta = "🔺" if direction == "alta" else "🔻" if direction == "baixa" else "⚪"
-    tend = ("Tendência de Alta Confirmada" if direction == "alta"
-            else "Tendência de Baixa Confirmada" if direction == "baixa"
-            else "Tendência em Formação")
-    insight = ("fluxo comprador muito forte — estrutura sólida"
-               if direction == "alta"
-               else "fluxo vendedor dominante — pressão de baixa"
-               if direction == "baixa"
-               else "monitorar aproximação de cruzamento")
-    return (f"🟢🟢🟢🟢\n"
-            f"📊 [OURO-TENDÊNCIA | Sinal Estratégico]\n\n"
-            f"Ativo: {sym}\n"
-            f"Direção: {seta} {tend}\n"
-            f"Força: {force:.0f}% (base técnica + fluxo)\n\n"
-            f"📈 Indicadores:\n"
-            f"• EMA9 {'>' if ema9 > ema20 else '<'} EMA20\n"
-            f"• MACD {'+' if macd_line > 0 else '-'} | Hist {'↑' if hist > 0 else '↓'}\n"
-            f"• RSI {rsi_val:.1f}\n"
-            f"• Book {ratio:.2f}× {'comprador' if ratio >= 1 else 'vendedor'} | Vol 5m {vol_mult:.1f}×\n\n"
-            f"🕒 Horário: {hora} (Brasília)\n──────────────\n"
-            f"📩 Insight: {insight}.")
-
-# =========================
-# LOOP PRINCIPAL
-# =========================
-cooldown = {}
+cooldown = {}  # mantido, mas não usado (pra não mexer na estrutura)
 
 async def scan_once():
     async with aiohttp.ClientSession() as s:
         all24 = await fetch_24hr(s)
         allow = set(PAIRS.split(",")) if PAIRS else None
+
         pool = [(x["symbol"], float(x["quoteVolume"])) for x in all24
                 if x["symbol"].endswith("USDT")
                 and (not allow or x["symbol"] in allow)
                 and float(x["quoteVolume"]) >= MIN_QV_USDT]
+
         symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
-        results = []
+
+        # garante cabeçalho do CSV na primeira vez
+        try:
+            if not os.path.exists(CSV_FILE):
+                with open(CSV_FILE, "w", encoding="utf-8") as cf:
+                    cf.write("hora,symbol,ema9,ema20,macd,hist,rsi,vol_mult,book_ratio\n")
+        except:
+            pass
+
         for sym in symbols:
             try:
-                kl, dp = await asyncio.gather(fetch_klines(s, sym, "5m", 120),
-                                              fetch_depth(s, sym, 40))
+                kl, dp = await asyncio.gather(
+                    fetch_klines(s, sym, "5m", 120),
+                    fetch_depth(s, sym, 40)
+                )
+
                 closes = [float(k[4]) for k in kl]
                 vols = [float(k[5]) for k in kl]
+
                 ema9 = ema(closes[-40:], 9)
                 ema20 = ema(closes[-40:], 20)
                 macd_line, hist = macd(closes)
                 rsi_val = rsi(closes)
+
                 base = statistics.median(vols[-11:-1]) or 1
                 vol_mult = vols[-1] / base
                 ratio = book_ratio(dp)
-                direction = decide_direction(ema9, ema20, macd_line)
-                force = calc_force(ema9, ema20, macd_line, hist, rsi_val, ratio)
-                ok_high = direction == "alta" and ratio >= BOOK_MIN_BUY and force >= MIN_FORCE
-                ok_low = direction == "baixa" and ratio <= BOOK_MIN_SELL and force >= MIN_FORCE
-                if ok_high or ok_low:
-                    results.append((sym, direction, force, ema9, ema20, macd_line, hist, rsi_val, ratio, vol_mult))
+
+                # ================================
+                # MONITORAMENTO: LOG + CSV
+                # ================================
+                hora = br_time()
+                log_line = (
+                    f"[{hora}] {sym} | 5m | "
+                    f"EMA9={ema9:.6f} | EMA20={ema20:.6f} | "
+                    f"MACD={macd_line:.6f} | HIST={hist:.6f} | "
+                    f"RSI={rsi_val:.1f} | VOLx={vol_mult:.2f} | BOOK={ratio:.2f}"
+                )
+
+                # imprime no console (Render logs)
+                print(log_line)
+
+                # grava em arquivo .log
+                try:
+                    with open(LOG_FILE, "a", encoding="utf-8") as lf:
+                        lf.write(log_line + "\n")
+                except:
+                    pass
+
+                # grava em CSV
+                try:
+                    with open(CSV_FILE, "a", encoding="utf-8") as cf:
+                        cf.write(
+                            f"{hora},{sym},{ema9:.6f},{ema20:.6f},"
+                            f"{macd_line:.6f},{hist:.6f},{rsi_val:.1f},"
+                            f"{vol_mult:.4f},{ratio:.4f}\n"
+                        )
+                except:
+                    pass
+
                 await asyncio.sleep(0.05)
-            except:
-                pass
-        now = datetime.utcnow()
-        msgs = []
-        for r in results:
-            sym = r[0]
-            nxt = cooldown.get(sym, datetime.min)
-            if now < nxt:
-                continue
-            msgs.append(build_alert(*r))
-            cooldown[sym] = now + timedelta(minutes=COOLDOWN_MIN)
-        for m in msgs[:3]:
-            print(m.replace("\n", " | "))
-            await send_telegram(m)
-            await asyncio.sleep(0.3)
+            except Exception as e:
+                print("Erro scan_once:", e)
 
 async def monitor_loop():
-    print("🚀 OURO-TENDÊNCIA v1.2 equilibrado ativo.")
+    print("🚀 OURO-TENDÊNCIA v1.2 equilibrado ativo (MODO MONITORAMENTO, sem alertas).")
     while True:
         try:
             await scan_once()
@@ -208,7 +190,11 @@ async def monitor_loop():
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    threading.Thread(target=lambda: app.run(host="0.0.0.0",
-                                            port=int(os.getenv("PORT", 10000)))).start()
+    threading.Thread(
+        target=lambda: app.run(
+            host="0.0.0.0",
+            port=int(os.getenv("PORT", 10000))
+        )
+    ).start()
     time.sleep(2)
     asyncio.run(monitor_loop())
