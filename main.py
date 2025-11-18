@@ -1,4 +1,4 @@
-import os, asyncio, aiohttp, time, threading, statistics
+import os, asyncio, aiohttp, time, threading, statistics, csv
 from datetime import datetime, timedelta
 from flask import Flask
 
@@ -6,21 +6,17 @@ from flask import Flask
 # CONFIGURAÇÃO (versão equilibrada)
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "30"))                  # monitora só top-30
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180")) # varredura a cada 3 min
-COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN", "90"))    # (não usado mais p/ alerta)
-MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))  # liquidez mínima 15 M USDT
-MIN_FORCE = int(os.getenv("MIN_FORCE", "90"))          # (não usado mais p/ alerta)
-BOOK_MIN_BUY = float(os.getenv("BOOK_MIN_BUY", "1.55"))    # book comprador forte
-BOOK_MIN_SELL = float(os.getenv("BOOK_MIN_SELL", "0.65"))  # book vendedor forte
+TOP_N = int(os.getenv("TOP_N", "30"))                  
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180")) 
+COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN", "90"))    
+MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))
+MIN_FORCE = int(os.getenv("MIN_FORCE", "90"))          
+BOOK_MIN_BUY = float(os.getenv("BOOK_MIN_BUY", "1.55"))
+BOOK_MIN_SELL = float(os.getenv("BOOK_MIN_SELL", "0.65"))
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
-
-# arquivos de monitoramento
-LOG_FILE = os.getenv("LOG_FILE", "monitor_ouro_tendencia.log")
-CSV_FILE = os.getenv("CSV_FILE", "monitor_ouro_tendencia.csv")
 
 # =========================
 # APP WEB (Render health)
@@ -29,7 +25,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "OURO-TENDÊNCIA v1.2 – Equilibrado (MODO MONITORAMENTO)", 200
+    return "OURO-TENDÊNCIA v1.2 – Equilibrado", 200
 
 @app.route("/health")
 def health():
@@ -40,10 +36,6 @@ def health():
 # =========================
 def br_time():
     return datetime.now().strftime("%H:%M:%S")
-
-async def send_telegram(message: str):
-    # modo monitoramento: não enviar nada
-    return
 
 async def get_json(session, url, params=None, timeout=15):
     for _ in range(2):
@@ -99,13 +91,24 @@ def book_ratio(depth):
     a = power(depth.get("asks", []))
     return b / a if a > 0 else 0
 
+def bollinger_width(closes, period=20):
+    if len(closes) < period:
+        return 0
+    window = closes[-period:]
+    mean = sum(window) / period
+    std = (sum((c - mean)**2 for c in window) / period) ** 0.5
+    up = mean + std * 2
+    dn = mean - std * 2
+    return ((up - dn) / mean) * 100 if mean != 0 else 0
+
 # =========================
-# LOOP PRINCIPAL (MODO MONITOR)
+# LOOP PRINCIPAL (ESTRUTURA MANTIDA)
 # =========================
-cooldown = {}  # mantido, mas não usado (pra não mexer na estrutura)
+cooldown = {}
 
 async def scan_once():
     async with aiohttp.ClientSession() as s:
+
         all24 = await fetch_24hr(s)
         allow = set(PAIRS.split(",")) if PAIRS else None
 
@@ -115,14 +118,6 @@ async def scan_once():
                 and float(x["quoteVolume"]) >= MIN_QV_USDT]
 
         symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
-
-        # garante cabeçalho do CSV na primeira vez
-        try:
-            if not os.path.exists(CSV_FILE):
-                with open(CSV_FILE, "w", encoding="utf-8") as cf:
-                    cf.write("hora,symbol,ema9,ema20,macd,hist,rsi,vol_mult,book_ratio\n")
-        except:
-            pass
 
         for sym in symbols:
             try:
@@ -136,51 +131,44 @@ async def scan_once():
 
                 ema9 = ema(closes[-40:], 9)
                 ema20 = ema(closes[-40:], 20)
+                ema200 = ema(closes, 200)
+
                 macd_line, hist = macd(closes)
                 rsi_val = rsi(closes)
 
                 base = statistics.median(vols[-11:-1]) or 1
                 vol_mult = vols[-1] / base
+
                 ratio = book_ratio(dp)
+                bw = bollinger_width(closes)
 
-                # ================================
-                # MONITORAMENTO: LOG + CSV
-                # ================================
-                hora = br_time()
-                log_line = (
-                    f"[{hora}] {sym} | 5m | "
-                    f"EMA9={ema9:.6f} | EMA20={ema20:.6f} | "
-                    f"MACD={macd_line:.6f} | HIST={hist:.6f} | "
-                    f"RSI={rsi_val:.1f} | VOLx={vol_mult:.2f} | BOOK={ratio:.2f}"
-                )
+                data_row = [
+                    br_time(),
+                    sym,
+                    closes[-1],
+                    rsi_val,
+                    macd_line,
+                    hist,
+                    ema9,
+                    ema20,
+                    ema200,
+                    vols[-1],
+                    vol_mult,
+                    ratio,
+                    bw
+                ]
 
-                # imprime no console (Render logs)
-                print(log_line)
-
-                # grava em arquivo .log
-                try:
-                    with open(LOG_FILE, "a", encoding="utf-8") as lf:
-                        lf.write(log_line + "\n")
-                except:
-                    pass
-
-                # grava em CSV
-                try:
-                    with open(CSV_FILE, "a", encoding="utf-8") as cf:
-                        cf.write(
-                            f"{hora},{sym},{ema9:.6f},{ema20:.6f},"
-                            f"{macd_line:.6f},{hist:.6f},{rsi_val:.1f},"
-                            f"{vol_mult:.4f},{ratio:.4f}\n"
-                        )
-                except:
-                    pass
+                with open("dados_coletados.csv", "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(data_row)
 
                 await asyncio.sleep(0.05)
+
             except Exception as e:
-                print("Erro scan_once:", e)
+                print("Erro:", e)
 
 async def monitor_loop():
-    print("🚀 OURO-TENDÊNCIA v1.2 equilibrado ativo (MODO MONITORAMENTO, sem alertas).")
+    print("🚀 OURO-TENDÊNCIA v1.2 equilibrado ativo (COLETANDO PADRÕES).")
     while True:
         try:
             await scan_once()
@@ -191,10 +179,7 @@ async def monitor_loop():
 
 if __name__ == "__main__":
     threading.Thread(
-        target=lambda: app.run(
-            host="0.0.0.0",
-            port=int(os.getenv("PORT", 10000))
-        )
+        target=lambda: app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
     ).start()
     time.sleep(2)
     asyncio.run(monitor_loop())
