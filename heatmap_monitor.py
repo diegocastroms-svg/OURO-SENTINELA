@@ -1,5 +1,4 @@
 # heatmap_monitor.py — Monitor de clusters (heatmap) com alerta único e dinâmico
-
 import os, asyncio, aiohttp, time, threading
 from datetime import datetime
 
@@ -8,26 +7,57 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# PARES DO HEATMAP (ex.: "BTCUSDT,ETHUSDT,HBARUSDT")
-HEATMAP_PAIRS = os.getenv("HEATMAP_PAIRS", "").strip()
-PAIRS = [p.strip() for p in HEATMAP_PAIRS.split(",") if p.strip()]
+# ============================================
+# GERAR LISTA DE TODOS OS PARES SPOT USDT
+# EXCLUINDO FIAT E STABLECOINS FRACAS
+# ============================================
+FIAT_BLOCK = (
+    "BRL", "EUR", "GBP", "TRY", "AUD", "CAD", "CHF",
+    "BUSD", "TUSD", "FDUSD", "USDC", "USDP", "USDE",
+    "BKRW", "BVND", "ZAR", "RUB", "MXN", "IDRT",
+)
+
+STABLES = ("USDT", "USDC", "BUSD", "TUSD", "FDUSD", "USDE")
+
+async def carregar_pairs_validos():
+    async with aiohttp.ClientSession() as s:
+        url = f"{BINANCE}/api/v3/exchangeInfo"
+        r = await s.get(url)
+        data = await r.json()
+
+        ativos = []
+        for sym in data["symbols"]:
+            if sym["status"] != "TRADING":
+                continue
+
+            quote = sym["quoteAsset"]
+
+            # bloquear todas as fiats e stablecoins exceto USDT
+            if quote in FIAT_BLOCK:
+                continue
+
+            if quote in STABLES and quote != "USDT":
+                continue
+
+            ativos.append(sym["symbol"])
+
+        return ativos
+
+PAIRS = []  # será carregado automaticamente
 
 # CONFIG
-HEATMAP_INTERVAL = int(os.getenv("HEATMAP_INTERVAL", "60"))            # segundos
-HEATMAP_MAX_DIST_PCT = float(os.getenv("HEATMAP_MAX_DIST_PCT", "0.10"))  # 10%
+HEATMAP_INTERVAL = int(os.getenv("HEATMAP_INTERVAL", "60"))
+HEATMAP_MAX_DIST_PCT = float(os.getenv("HEATMAP_MAX_DIST_PCT", "0.10"))
 HEATMAP_MIN_CLUSTER_USD = float(os.getenv("HEATMAP_MIN_CLUSTER_USD", "150000"))
 HEATMAP_MIN_DOMINANCE_RATIO = float(os.getenv("HEATMAP_MIN_DOMINANCE_RATIO", "1.3"))
-HEATMAP_ALERT_COOLDOWN = int(os.getenv("HEATMAP_ALERT_COOLDOWN", "900"))  # 15 min
+HEATMAP_ALERT_COOLDOWN = int(os.getenv("HEATMAP_ALERT_COOLDOWN", "900"))
 
-_last_alert = {}   # { "BTCUSDT": {"ts": ..., "side": "UP"/"DOWN"} }
-
+_last_alert = {}
 
 def br_time():
     return datetime.now().strftime("%H:%M:%S")
 
-
 async def tg(session, msg):
-    """Envia mensagem pro Telegram ou printa no log se não tiver token."""
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print(f"[{br_time()}] [TG-OFF] {msg}")
         return
@@ -40,7 +70,6 @@ async def tg(session, msg):
     except Exception as e:
         print(f"[{br_time()}] [TG-ERROR] {e}")
 
-
 async def get_json(session, url, params=None, timeout=15):
     for _ in range(2):
         try:
@@ -50,7 +79,6 @@ async def get_json(session, url, params=None, timeout=15):
             await asyncio.sleep(0.3)
     return None
 
-
 async def fetch_depth(session, sym, limit=100):
     return await get_json(
         session,
@@ -58,16 +86,14 @@ async def fetch_depth(session, sym, limit=100):
         {"symbol": sym, "limit": limit},
     )
 
-
 def analisar_book(depth, mid_price):
-    """Acha maior cluster de venda acima e compra abaixo do preço médio."""
     asks = [(float(p), float(q)) for p, q in depth.get("asks", [])]
     bids = [(float(p), float(q)) for p, q in depth.get("bids", [])]
 
     max_up, max_down = None, None
     max_dist = mid_price * HEATMAP_MAX_DIST_PCT
 
-    # Venda (acima)
+    # clusters de venda (acima)
     for p, q in asks:
         if p <= mid_price:
             continue
@@ -79,7 +105,7 @@ def analisar_book(depth, mid_price):
         if (max_up is None) or (notional > max_up["notional"]):
             max_up = {"price": p, "notional": notional}
 
-    # Compra (abaixo)
+    # clusters de compra (abaixo)
     for p, q in bids:
         if p >= mid_price:
             continue
@@ -93,18 +119,14 @@ def analisar_book(depth, mid_price):
 
     return {"cluster_up": max_up, "cluster_down": max_down}
 
-
 def decidir_direcao(info):
-    """Decide se UP, DOWN ou FLAT e calcula dominância."""
     up = info["cluster_up"]
     down = info["cluster_down"]
 
     if not up and not down:
         return {"side": "FLAT", "dominance": 0.0}
-
     if up and not down:
         return {"side": "UP", "dominance": 1.0}
-
     if down and not up:
         return {"side": "DOWN", "dominance": 1.0}
 
@@ -121,9 +143,7 @@ def decidir_direcao(info):
 
     return {"side": "FLAT", "dominance": 0.0}
 
-
 def _pode_alertar(symbol, side):
-    """Cooldown por par/direção."""
     now = time.time()
     info = _last_alert.get(symbol)
 
@@ -141,12 +161,12 @@ def _pode_alertar(symbol, side):
     _last_alert[symbol] = {"ts": now, "side": side}
     return True
 
-
 async def monitorar_heatmap():
-    """Loop principal do heatmap."""
+    global PAIRS
+
+    # carregar pares válidos automaticamente
     if not PAIRS:
-        print(f"[{br_time()}] [HEATMAP] Nenhum par configurado em HEATMAP_PAIRS.")
-        return
+        PAIRS = await carregar_pairs_validos()
 
     print(f"[{br_time()}] [HEATMAP] Ativo para: {', '.join(PAIRS)}")
 
@@ -197,9 +217,7 @@ async def monitorar_heatmap():
 
             await asyncio.sleep(HEATMAP_INTERVAL)
 
-
 def start_heatmap_monitor():
-    """Inicia o heatmap em uma thread separada (como o seu bot principal)."""
     def runner():
         asyncio.run(monitorar_heatmap())
 
@@ -207,7 +225,5 @@ def start_heatmap_monitor():
     t.start()
     return t
 
-
 if __name__ == "__main__":
-    # Se rodar este arquivo sozinho (local)
     asyncio.run(monitorar_heatmap())
