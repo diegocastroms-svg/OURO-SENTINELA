@@ -2,15 +2,17 @@ import os, asyncio, aiohttp, time, threading, statistics, csv
 from datetime import datetime
 from flask import Flask, send_file, Response
 
+from heatmap_monitor import start_heatmap_monitor  # <<<<<< ADICIONADO
+
 # =========================
 # CONFIGURAÇÃO (versão equilibrada)
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "30"))                  # monitora só top-30
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180")) # varredura a cada 3 min
-MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))  # liquidez mínima 15 M USDT
-BOOK_MIN_BUY = float(os.getenv("BOOK_MIN_BUY", "1.55"))    # book comprador forte
-BOOK_MIN_SELL = float(os.getenv("BOOK_MIN_SELL", "0.65"))  # book vendedor forte
+TOP_N = int(os.getenv("TOP_N", "30"))                  
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180")) 
+MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))  
+BOOK_MIN_BUY = float(os.getenv("BOOK_MIN_BUY", "1.55"))    
+BOOK_MIN_SELL = float(os.getenv("BOOK_MIN_SELL", "0.65"))  
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -23,8 +25,7 @@ CSV_FILE = "dados_coletados.csv"
 # =========================
 app = Flask(__name__)
 
-# memória simples pra mostrar na rota /resultado
-historico = []  # cada item: dict com infos da moeda naquele scan
+historico = []  
 
 
 @app.route("/")
@@ -39,9 +40,8 @@ def health():
 
 @app.route("/resultado")
 def resultado():
-    # gera HTML simples com tabela dos últimos registros
-    linhas = historico[-500:]  # últimos 500 pra não pesar
-    linhas = list(reversed(linhas))  # mais recentes primeiro
+    linhas = historico[-500:]  
+    linhas = list(reversed(linhas))  
 
     html = [
         "<html><head><meta charset='utf-8'><title>Resultado OURO-TENDÊNCIA</title>",
@@ -88,7 +88,6 @@ def resultado():
 
 @app.route("/download")
 def download():
-    # tenta devolver o CSV; se ainda não existir, avisa
     if not os.path.exists(CSV_FILE):
         return "Arquivo ainda não gerado. Deixe o bot rodando alguns minutos.", 404
     return send_file(CSV_FILE, as_attachment=True)
@@ -221,7 +220,6 @@ async def scan_once():
 
         print(f"[{br_time()}] Monitorando {len(symbols)} pares: {', '.join(symbols)}")
 
-        # garante cabeçalho do CSV (uma vez)
         if not os.path.exists(CSV_FILE):
             with open(CSV_FILE, "w", newline="") as f:
                 w = csv.writer(f)
@@ -254,7 +252,6 @@ async def scan_once():
                 direcao = decide_direction(ema9, ema20, macd_line)
                 forca = calc_force(ema9, ema20, macd_line, hist, rsi_val, ratio)
 
-                # salva em memória para a rota /resultado
                 registro = {
                     "hora": br_time(),
                     "moeda": sym,
@@ -268,7 +265,6 @@ async def scan_once():
                 if len(historico) > 5000:
                     del historico[:len(historico) - 5000]
 
-                # salva no CSV
                 with open(CSV_FILE, "a", newline="") as f:
                     w = csv.writer(f)
                     w.writerow([
@@ -313,8 +309,9 @@ def start_background_loop():
     return t
 
 
-# dispara o loop em background assim que o módulo é importado
+# ======== ATIVAÇÃO DOS DOIS MOTORES =========
 start_background_loop()
+start_heatmap_monitor()   # <<<<<< ADICIONADO
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
