@@ -7,18 +7,10 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# ============================================
-# GERAR LISTA DE TODOS OS PARES SPOT USDT
-# EXCLUINDO FIAT E STABLECOINS FRACAS
-# ============================================
-FIAT_BLOCK = (
-    "BRL", "EUR", "GBP", "TRY", "AUD", "CAD", "CHF",
-    "BUSD", "TUSD", "FDUSD", "USDC", "USDP", "USDE",
-    "BKRW", "BVND", "ZAR", "RUB", "MXN", "IDRT",
-)
 
-STABLES = ("USDT", "USDC", "BUSD", "TUSD", "FDUSD", "USDE")
-
+# ============================================
+# ACEITAR SOMENTE PARES SPOT USDT
+# ============================================
 async def carregar_pairs_validos():
     async with aiohttp.ClientSession() as s:
         url = f"{BINANCE}/api/v3/exchangeInfo"
@@ -27,23 +19,21 @@ async def carregar_pairs_validos():
 
         ativos = []
         for sym in data["symbols"]:
+
             if sym["status"] != "TRADING":
                 continue
 
-            quote = sym["quoteAsset"]
-
-            # bloquear todas as fiats e stablecoins exceto USDT
-            if quote in FIAT_BLOCK:
-                continue
-
-            if quote in STABLES and quote != "USDT":
+            # ACEITAR SOMENTE QUOTE USDT
+            if sym["quoteAsset"] != "USDT":
                 continue
 
             ativos.append(sym["symbol"])
 
         return ativos
 
+
 PAIRS = []  # será carregado automaticamente
+
 
 # CONFIG
 HEATMAP_INTERVAL = int(os.getenv("HEATMAP_INTERVAL", "60"))
@@ -54,8 +44,10 @@ HEATMAP_ALERT_COOLDOWN = int(os.getenv("HEATMAP_ALERT_COOLDOWN", "900"))
 
 _last_alert = {}
 
+
 def br_time():
     return datetime.now().strftime("%H:%M:%S")
+
 
 async def tg(session, msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -70,6 +62,7 @@ async def tg(session, msg):
     except Exception as e:
         print(f"[{br_time()}] [TG-ERROR] {e}")
 
+
 async def get_json(session, url, params=None, timeout=15):
     for _ in range(2):
         try:
@@ -79,12 +72,14 @@ async def get_json(session, url, params=None, timeout=15):
             await asyncio.sleep(0.3)
     return None
 
+
 async def fetch_depth(session, sym, limit=100):
     return await get_json(
         session,
         f"{BINANCE}/api/v3/depth",
         {"symbol": sym, "limit": limit},
     )
+
 
 def analisar_book(depth, mid_price):
     asks = [(float(p), float(q)) for p, q in depth.get("asks", [])]
@@ -119,6 +114,7 @@ def analisar_book(depth, mid_price):
 
     return {"cluster_up": max_up, "cluster_down": max_down}
 
+
 def decidir_direcao(info):
     up = info["cluster_up"]
     down = info["cluster_down"]
@@ -143,6 +139,7 @@ def decidir_direcao(info):
 
     return {"side": "FLAT", "dominance": 0.0}
 
+
 def _pode_alertar(symbol, side):
     now = time.time()
     info = _last_alert.get(symbol)
@@ -161,10 +158,10 @@ def _pode_alertar(symbol, side):
     _last_alert[symbol] = {"ts": now, "side": side}
     return True
 
+
 async def monitorar_heatmap():
     global PAIRS
 
-    # carregar pares válidos automaticamente
     if not PAIRS:
         PAIRS = await carregar_pairs_validos()
 
@@ -217,6 +214,7 @@ async def monitorar_heatmap():
 
             await asyncio.sleep(HEATMAP_INTERVAL)
 
+
 def start_heatmap_monitor():
     def runner():
         asyncio.run(monitorar_heatmap())
@@ -224,6 +222,7 @@ def start_heatmap_monitor():
     t = threading.Thread(target=runner, daemon=True)
     t.start()
     return t
+
 
 if __name__ == "__main__":
     asyncio.run(monitorar_heatmap())
