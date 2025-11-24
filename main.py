@@ -1,103 +1,42 @@
-import os, asyncio, aiohttp, time, threading, statistics, csv
+# heatmap_monitor.py — Monitor de clusters (heatmap) com alerta único e dinâmico
+
+import os, asyncio, aiohttp, time
 from datetime import datetime
-from flask import Flask, send_file, Response
 
-from heatmap_monitor import start_heatmap_monitor  # <<<<<< ADICIONADO
-
-# =========================
-# CONFIGURAÇÃO (versão equilibrada)
-# =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "30"))                  
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180")) 
-MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))  
-BOOK_MIN_BUY = float(os.getenv("BOOK_MIN_BUY", "1.55"))    
-BOOK_MIN_SELL = float(os.getenv("BOOK_MIN_SELL", "0.65"))  
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
-PAIRS = os.getenv("PAIRS", "").strip()
 
-CSV_FILE = "dados_coletados.csv"
+HEATMAP_PAIRS = os.getenv("HEATMAP_PAIRS", "").strip()
+PAIRS = [p.strip() for p in HEATMAP_PAIRS.split(",") if p.strip()]
 
-# =========================
-# APP WEB (Render health)
-# =========================
-app = Flask(__name__)
+HEATMAP_INTERVAL = int(os.getenv("HEATMAP_INTERVAL", "60"))
+HEATMAP_MAX_DIST_PCT = float(os.getenv("HEATMAP_MAX_DIST_PCT", "0.10"))
+HEATMAP_MIN_CLUSTER_USD = float(os.getenv("HEATMAP_MIN_CLUSTER_USD", "150000"))
+HEATMAP_MIN_DOMINANCE_RATIO = float(os.getenv("HEATMAP_MIN_DOMINANCE_RATIO", "1.3"))
+HEATMAP_ALERT_COOLDOWN = int(os.getenv("HEATMAP_ALERT_COOLDOWN", "900"))
 
-historico = []  
-
-
-@app.route("/")
-def home():
-    return "OURO-TENDÊNCIA v1.2 – Coleta de Padrões ATIVA", 200
+_last_alert = {}
 
 
-@app.route("/health")
-def health():
-    return "OK", 200
-
-
-@app.route("/resultado")
-def resultado():
-    linhas = historico[-500:]  
-    linhas = list(reversed(linhas))  
-
-    html = [
-        "<html><head><meta charset='utf-8'><title>Resultado OURO-TENDÊNCIA</title>",
-        "<style>",
-        "body { font-family: Arial, sans-serif; background:#111; color:#eee; }",
-        "table { border-collapse: collapse; width: 100%; font-size: 12px; }",
-        "th, td { border: 1px solid #444; padding: 4px 6px; text-align: center; }",
-        "th { background: #222; }",
-        ".forte-alta { background:#063; }",
-        ".forte-baixa { background:#600; }",
-        "</style></head><body>",
-        "<h2>OURO-TENDÊNCIA v1.2 – Resultado do Monitoramento</h2>",
-        f"<p>Total de registros: {len(historico)}</p>",
-        "<p><a href='/download' style='color:#0af'>⬇️ Baixar CSV completo</a></p>",
-        "<table>",
-        "<tr>",
-        "<th>Hora</th><th>Moeda</th><th>Direção</th><th>Força</th>",
-        "<th>RSI</th><th>Book</th><th>Vol x</th>",
-        "</tr>"
-    ]
-
-    for row in linhas:
-        cls = ""
-        if row["direcao"] == "alta" and row["forca"] >= 90 and row["book"] >= BOOK_MIN_BUY:
-            cls = "forte-alta"
-        elif row["direcao"] == "baixa" and row["forca"] >= 90 and row["book"] <= BOOK_MIN_SELL:
-            cls = "forte-baixa"
-
-        html.append(
-            f"<tr class='{cls}'>"
-            f"<td>{row['hora']}</td>"
-            f"<td>{row['moeda']}</td>"
-            f"<td>{row['direcao']}</td>"
-            f"<td>{row['forca']}</td>"
-            f"<td>{row['rsi']:.1f}</td>"
-            f"<td>{row['book']:.2f}</td>"
-            f"<td>{row['vol_mult']:.1f}</td>"
-            f"</tr>"
-        )
-
-    html.append("</table></body></html>")
-    return Response("".join(html), mimetype="text/html")
-
-
-@app.route("/download")
-def download():
-    if not os.path.exists(CSV_FILE):
-        return "Arquivo ainda não gerado. Deixe o bot rodando alguns minutos.", 404
-    return send_file(CSV_FILE, as_attachment=True)
-
-
-# =========================
-# UTILITÁRIOS
-# =========================
 def br_time():
     return datetime.now().strftime("%H:%M:%S")
+
+
+async def tg(session, msg):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print(f"[{br_time()}] [TG-OFF] {msg}")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": msg}
+
+    try:
+        async with session.post(url, json=payload, timeout=10):
+            pass
+    except Exception as e:
+        print(f"[{br_time()}] [TG-ERROR] {e}")
 
 
 async def get_json(session, url, params=None, timeout=15):
@@ -106,212 +45,147 @@ async def get_json(session, url, params=None, timeout=15):
             async with session.get(url, params=params, timeout=timeout) as r:
                 return await r.json()
         except Exception:
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
     return None
 
 
-async def fetch_24hr(session):
-    return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
+async def fetch_depth(session, sym, limit=100):
+    return await get_json(session, f"{BINANCE}/api/v3/depth",
+                          {"symbol": sym, "limit": limit})
 
 
-async def fetch_klines(session, sym, interval="5m", limit=120):
-    return await get_json(
-        session,
-        f"{BINANCE}/api/v3/klines",
-        {"symbol": sym, "interval": interval, "limit": limit},
-    )
+def analisar_book(depth, mid_price):
+    asks = [(float(p), float(q)) for p, q in depth.get("asks", [])]
+    bids = [(float(p), float(q)) for p, q in depth.get("bids", [])]
+
+    max_up, max_down = None, None
+    max_dist = mid_price * HEATMAP_MAX_DIST_PCT
+
+    # Venda (acima)
+    for p, q in asks:
+        if p <= mid_price:
+            continue
+        if p - mid_price > max_dist:
+            continue
+        notional = p * q
+        if notional < HEATMAP_MIN_CLUSTER_USD:
+            continue
+        if (max_up is None) or (notional > max_up["notional"]):
+            max_up = {"price": p, "notional": notional}
+
+    # Compra (abaixo)
+    for p, q in bids:
+        if p >= mid_price:
+            continue
+        if mid_price - p > max_dist:
+            continue
+        notional = p * q
+        if notional < HEATMAP_MIN_CLUSTER_USD:
+            continue
+        if (max_down is None) or (notional > max_down["notional"]):
+            max_down = {"price": p, "notional": notional}
+
+    return {"cluster_up": max_up, "cluster_down": max_down}
 
 
-async def fetch_depth(session, sym, limit=40):
-    return await get_json(
-        session,
-        f"{BINANCE}/api/v3/depth",
-        {"symbol": sym, "limit": limit},
-    )
+def decidir_direcao(info):
+    up = info["cluster_up"]
+    down = info["cluster_down"]
+
+    if not up and not down:
+        return {"side": "FLAT", "dominance": 0}
+
+    if up and not down:
+        return {"side": "UP", "dominance": 1}
+
+    if down and not up:
+        return {"side": "DOWN", "dominance": 1}
+
+    up_n = up["notional"]
+    down_n = down["notional"]
+
+    if up_n > down_n * HEATMAP_MIN_DOMINANCE_RATIO:
+        dom = up_n / (up_n + down_n)
+        return {"side": "UP", "dominance": dom}
+
+    if down_n > up_n * HEATMAP_MIN_DOMINANCE_RATIO:
+        dom = down_n / (up_n + down_n)
+        return {"side": "DOWN", "dominance": dom}
+
+    return {"side": "FLAT", "dominance": 0}
 
 
-# =========================
-# INDICADORES
-# =========================
-def ema(values, period):
-    if not values:
-        return 0.0
-    k = 2 / (period + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = v * k + e * (1 - k)
-    return e
+def _pode_alertar(symbol, side):
+    now = time.time()
+    info = _last_alert.get(symbol)
+
+    if not info:
+        _last_alert[symbol] = {"ts": now, "side": side}
+        return True
+
+    if info["side"] != side:
+        _last_alert[symbol] = {"ts": now, "side": side}
+        return True
+
+    if now - info["ts"] < HEATMAP_ALERT_COOLDOWN:
+        return False
+
+    _last_alert[symbol] = {"ts": now, "side": side}
+    return True
 
 
-def macd(values, fast=12, slow=26, signal=9):
-    if len(values) < slow + signal:
-        return 0.0, 0.0
-    window = values[-(slow + signal):]
-    ema_fast = ema(window, fast)
-    ema_slow = ema(window, slow)
-    macd_line = ema_fast - ema_slow
-    sig = ema([macd_line] * signal, signal)
-    return macd_line, macd_line - sig
+async def monitorar_heatmap():
+    if not PAIRS:
+        print(f"[{br_time()}] [HEATMAP] Nenhum par configurado.")
+        return
+
+    print(f"[{br_time()}] [HEATMAP] Ativo para: {', '.join(PAIRS)}")
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            for sym in PAIRS:
+                try:
+                    depth = await fetch_depth(session, sym, 100)
+                    if not depth or "bids" not in depth or "asks" not in depth:
+                        continue
+
+                    best_bid = float(depth["bids"][0][0])
+                    best_ask = float(depth["asks"][0][0])
+                    mid = (best_bid + best_ask) / 2
+
+                    info = analisar_book(depth, mid)
+                    dec = decidir_direcao(info)
+                    side, dom = dec["side"], dec["dominance"]
+
+                    if side in ("UP", "DOWN") and dom >= 0.55:
+                        cluster = info["cluster_up"] if side == "UP" else info["cluster_down"]
+                        alvo = cluster["price"]
+                        notional = cluster["notional"]
+
+                        if _pode_alertar(sym, side):
+                            # ALERTA ÚNICO – COMPACTO + DINÂMICO
+                            if side == "UP":
+                                msg = (
+                                    f"🔥 HEATMAP {sym} — ALTA FORTE\n"
+                                    f"Preço: {mid:.6f} → Cluster: {alvo:.6f}\n"
+                                    f"Notional: ~{notional:,.0f} USDT | Dom: {dom*100:.1f}%\n\n"
+                                    f"Fluxo comprador dominante (entrada antecipada possível)"
+                                )
+                            else:
+                                msg = (
+                                    f"⚠️ HEATMAP {sym} — QUEDA FORTE\n"
+                                    f"Preço: {mid:.6f} → Cluster: {alvo:.6f}\n"
+                                    f"Notional: ~{notional:,.0f} USDT | Dom: {dom*100:.1f}%\n\n"
+                                    f"Pressão vendedora dominante (tendência imediata de queda)"
+                                )
+
+                            await tg(session, msg)
+
+                except Exception as e:
+                    print(f"[{br_time()}] [HEATMAP-ERROR] {sym}: {e}")
+
+            await asyncio.sleep(HEATMAP_INTERVAL)
 
 
-def rsi(values, period=14):
-    if len(values) < period + 1:
-        return 50.0
-    gains = [max(values[i] - values[i - 1], 0.0) for i in range(1, len(values))]
-    losses = [max(values[i - 1] - values[i], 0.0) for i in range(1, len(values))]
-    ag = sum(gains[-period:]) / period
-    al = sum(losses[-period:]) / period or 1e-9
-    return 100.0 - (100.0 / (1.0 + ag / al))
-
-
-def book_ratio(depth):
-    def power(levels):
-        return sum(float(p) * float(q) for p, q in levels[:20])
-    b = power(depth.get("bids", []))
-    a = power(depth.get("asks", []))
-    return b / a if a > 0 else 0.0
-
-
-def decide_direction(ema9, ema20, macd_line):
-    if ema9 > ema20 and macd_line > 0:
-        return "alta"
-    if ema9 < ema20 and macd_line < 0:
-        return "baixa"
-    return "neutra"
-
-
-def calc_force(ema9, ema20, macd_line, hist, rsi_val, ratio):
-    score = 0
-    if ema9 > ema20:
-        score += 15
-    if macd_line > 0 and hist > 0:
-        score += 25
-    if 45 < rsi_val < 65:
-        score += 10
-    if ratio >= BOOK_MIN_BUY:
-        score += 50
-    if ema9 < ema20 and macd_line < 0 and ratio <= BOOK_MIN_SELL:
-        score = max(score, 80)
-    return min(score, 100)
-
-
-# =========================
-# LOOP PRINCIPAL (COLETA)
-# =========================
-async def scan_once():
-    print(f"[{br_time()}] === Iniciando varredura ===")
-    async with aiohttp.ClientSession() as s:
-        all24 = await fetch_24hr(s)
-        if not all24:
-            print(f"[{br_time()}] Erro ao obter 24hr.")
-            return
-
-        allow = set(PAIRS.split(",")) if PAIRS else None
-
-        pool = [
-            (x["symbol"], float(x["quoteVolume"]))
-            for x in all24
-            if x["symbol"].endswith("USDT")
-            and (not allow or x["symbol"] in allow)
-            and float(x["quoteVolume"]) >= MIN_QV_USDT
-        ]
-
-        symbols = [sym for sym, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
-
-        print(f"[{br_time()}] Monitorando {len(symbols)} pares: {', '.join(symbols)}")
-
-        if not os.path.exists(CSV_FILE):
-            with open(CSV_FILE, "w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow([
-                    "hora", "moeda", "direcao", "forca",
-                    "rsi", "book", "vol_mult"
-                ])
-
-        for sym in symbols:
-            try:
-                kl, dp = await asyncio.gather(
-                    fetch_klines(s, sym, "5m", 120),
-                    fetch_depth(s, sym, 40),
-                )
-                if not kl or not dp:
-                    continue
-
-                closes = [float(k[4]) for k in kl]
-                vols = [float(k[5]) for k in kl]
-
-                ema9 = ema(closes[-40:], 9)
-                ema20 = ema(closes[-40:], 20)
-                macd_line, hist = macd(closes)
-                rsi_val = rsi(closes)
-
-                base = statistics.median(vols[-11:-1]) or 1.0
-                vol_mult = vols[-1] / base
-                ratio = book_ratio(dp)
-
-                direcao = decide_direction(ema9, ema20, macd_line)
-                forca = calc_force(ema9, ema20, macd_line, hist, rsi_val, ratio)
-
-                registro = {
-                    "hora": br_time(),
-                    "moeda": sym,
-                    "direcao": direcao,
-                    "forca": forca,
-                    "rsi": rsi_val,
-                    "book": ratio,
-                    "vol_mult": vol_mult
-                }
-                historico.append(registro)
-                if len(historico) > 5000:
-                    del historico[:len(historico) - 5000]
-
-                with open(CSV_FILE, "a", newline="") as f:
-                    w = csv.writer(f)
-                    w.writerow([
-                        registro["hora"],
-                        registro["moeda"],
-                        registro["direcao"],
-                        registro["forca"],
-                        f"{registro['rsi']:.2f}",
-                        f"{registro['book']:.4f}",
-                        f"{registro['vol_mult']:.2f}",
-                    ])
-
-                print(
-                    f"[{br_time()}] COLETADO: {sym} | dir={direcao} | força={forca}% | "
-                    f"RSI={rsi_val:.1f} | book={ratio:.2f} | vol x{vol_mult:.1f}"
-                )
-
-                await asyncio.sleep(0.05)
-
-            except Exception as e:
-                print(f"[{br_time()}] Erro analisando {sym}: {e}")
-
-    print(f"[{br_time()}] === Varredura finalizada ===")
-
-
-async def monitor_loop():
-    print("🚀 OURO-TENDÊNCIA v1.2 – COLETA DE PADRÕES ATIVA.")
-    while True:
-        try:
-            await scan_once()
-            await asyncio.sleep(SCAN_INTERVAL)
-        except Exception as e:
-            print(f"[{br_time()}] ⚠️ Erro no loop principal: {e}")
-            await asyncio.sleep(5)
-
-
-def start_background_loop():
-    def runner():
-        asyncio.run(monitor_loop())
-    t = threading.Thread(target=runner, daemon=True)
-    t.start()
-    return t
-
-
-# ======== ATIVAÇÃO DOS DOIS MOTORES =========
-start_background_loop()
-start_heatmap_monitor()   # <<<<<< ADICIONADO
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+def start_heatmap_monitor():
+    asyncio.create_task(monitorar_heatmap())
