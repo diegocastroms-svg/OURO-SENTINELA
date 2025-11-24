@@ -1,7 +1,6 @@
 # heatmap_monitor.py — Monitor simples de “heatmap” usando apenas o book da Binance (GRÁTIS)
-# Pensado pra encaixar no padrão do OURO-TENDÊNCIA v1.2, sem mexer no código principal.
 
-import os, asyncio, aiohttp, time
+import os, asyncio, aiohttp, time, threading
 from datetime import datetime
 
 BINANCE = "https://api.binance.com"
@@ -9,26 +8,16 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# Lista de pares a monitorar (ex.: "OGUSDT,TSTUSDT,GPSUSDT")
 HEATMAP_PAIRS = os.getenv("HEATMAP_PAIRS", "").strip()
 PAIRS = [p.strip() for p in HEATMAP_PAIRS.split(",") if p.strip()]
 
-# Intervalo entre varreduras do “heatmap” (segundos)
 HEATMAP_INTERVAL = int(os.getenv("HEATMAP_INTERVAL", "60"))
-
-# Distância máxima (em %) a partir do preço médio pra procurar clusters
-HEATMAP_MAX_DIST_PCT = float(os.getenv("HEATMAP_MAX_DIST_PCT", "0.10"))  # 10%
-
-# Valor mínimo em USDT pra considerar um “cluster forte”
+HEATMAP_MAX_DIST_PCT = float(os.getenv("HEATMAP_MAX_DIST_PCT", "0.10"))
 HEATMAP_MIN_CLUSTER_USD = float(os.getenv("HEATMAP_MIN_CLUSTER_USD", "150000"))
-
-# Diferença mínima entre cluster up/down pra dizer que há direção (1.3 = 30% maior)
 HEATMAP_MIN_DOMINANCE_RATIO = float(os.getenv("HEATMAP_MIN_DOMINANCE_RATIO", "1.3"))
+HEATMAP_ALERT_COOLDOWN = int(os.getenv("HEATMAP_ALERT_COOLDOWN", "900"))
 
-# Cooldown de alerta por par/direção (segundos)
-HEATMAP_ALERT_COOLDOWN = int(os.getenv("HEATMAP_ALERT_COOLDOWN", "900"))  # 15 min
-
-_last_alert = {}  # { "OGUSDT": {"ts": 1234567890, "side": "UP" / "DOWN"} }
+_last_alert = {}
 
 
 def br_time():
@@ -67,27 +56,13 @@ async def fetch_depth(session, sym, limit=100):
 
 
 def analisar_book(depth: dict, mid_price: float) -> dict:
-    """
-    Lê o book e encontra:
-      - maior cluster de venda acima (asks)
-      - maior cluster de compra abaixo (bids)
-    dentro de HEATMAP_MAX_DIST_PCT a partir do preço médio (mid_price).
-
-    Retorna:
-      {
-        "cluster_up": {"price": ..., "notional": ...} ou None,
-        "cluster_down": {"price": ..., "notional": ...} ou None
-      }
-    """
     asks = [(float(p), float(q)) for p, q in depth.get("asks", [])]
     bids = [(float(p), float(q)) for p, q in depth.get("bids", [])]
 
     max_up = None
     max_down = None
-
     max_dist = mid_price * HEATMAP_MAX_DIST_PCT
 
-    # Cluster de venda acima (asks)
     for p, q in asks:
         if p <= mid_price:
             continue
@@ -99,7 +74,6 @@ def analisar_book(depth: dict, mid_price: float) -> dict:
         if (max_up is None) or (notional > max_up["notional"]):
             max_up = {"price": p, "notional": notional}
 
-    # Cluster de compra abaixo (bids)
     for p, q in bids:
         if p >= mid_price:
             continue
@@ -118,18 +92,6 @@ def analisar_book(depth: dict, mid_price: float) -> dict:
 
 
 def decidir_direcao(info: dict) -> dict:
-    """
-    Recebe info com cluster_up/cluster_down e decide se:
-      - há dominância para cima
-      - há dominância para baixo
-      - ou mercado indeciso
-
-    Retorna:
-      {
-        "side": "UP" / "DOWN" / "FLAT",
-        "dominance": float (0-1),
-      }
-    """
     up = info.get("cluster_up")
     down = info.get("cluster_down")
 
@@ -157,9 +119,6 @@ def decidir_direcao(info: dict) -> dict:
 
 
 def _pode_alertar(symbol: str, side: str) -> bool:
-    """
-    Cooldown simples por par/direção.
-    """
     now_ts = time.time()
     info = _last_alert.get(symbol)
 
@@ -167,12 +126,10 @@ def _pode_alertar(symbol: str, side: str) -> bool:
         _last_alert[symbol] = {"ts": now_ts, "side": side}
         return True
 
-    # mudou o lado (UP -> DOWN ou DOWN -> UP) → libera alerta
     if info["side"] != side:
         _last_alert[symbol] = {"ts": now_ts, "side": side}
         return True
 
-    # ainda dentro do cooldown → não alerta
     if now_ts - info["ts"] < HEATMAP_ALERT_COOLDOWN:
         return False
 
@@ -181,17 +138,11 @@ def _pode_alertar(symbol: str, side: str) -> bool:
 
 
 async def monitorar_heatmap():
-    """
-    Loop principal do monitor de "heatmap" baseado no book.
-    Pode ser rodado em paralelo ao bot principal.
-    Exemplo de uso no seu código principal:
-        asyncio.create_task(monitorar_heatmap())
-    """
     if not PAIRS:
         print(f"[{br_time()}] [HEATMAP] Nenhum par configurado em HEATMAP_PAIRS.")
         return
 
-    print(f"[{br_time()}] [HEATMAP] Monitor de heatmap iniciado para: {', '.join(PAIRS)}")
+    print(f"[{br_time()}] [HEATMAP] Monitor iniciado para: {', '.join(PAIRS)}")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -213,17 +164,20 @@ async def monitorar_heatmap():
 
                     if side in ("UP", "DOWN") and dom >= 0.55:
                         cluster = info["cluster_up"] if side == "UP" else info["cluster_down"]
+
                         if cluster and _pode_alertar(symbol, side):
                             alvo = cluster["price"]
                             notional = cluster["notional"]
+
                             msg = (
                                 f"{br_time()} — HEATMAP {symbol}\n"
-                                f"Preço médio atual: {mid:.6f}\n"
+                                f"Preço médio: {mid:.6f}\n"
                                 f"Direção provável: {'ALTA' if side == 'UP' else 'QUEDA'}\n"
-                                f"Cluster {'acima' if side == 'UP' else 'abaixo'}: {alvo:.6f}\n"
-                                f"Notional estimado do cluster: ~{notional:,.0f} USDT\n"
-                                f"Dominância desse lado: {dom*100:.1f}%\n"
+                                f"Cluster: {alvo:.6f}\n"
+                                f"Notional: ~{notional:,.0f} USDT\n"
+                                f"Dominância: {dom*100:.1f}%"
                             )
+
                             await tg(session, msg)
 
                 except Exception as e:
@@ -232,6 +186,21 @@ async def monitorar_heatmap():
             await asyncio.sleep(HEATMAP_INTERVAL)
 
 
+# ⚠️ **AQUI ESTÁ A FUNÇÃO QUE FALTAVA**
+def start_heatmap_monitor():
+    """
+    Inicia o monitor do heatmap em background.
+    O main.py chama EXATAMENTE esta função.
+    NÃO ALTERAR O NOME.
+    """
+    def runner():
+        asyncio.run(monitorar_heatmap())
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    print(f"[{br_time()}] Heatmap monitor iniciado em background.")
+    return t
+
+
 if __name__ == "__main__":
-    # Execução independente opcional (se rodar este arquivo sozinho)
     asyncio.run(monitorar_heatmap())
