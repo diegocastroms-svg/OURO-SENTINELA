@@ -9,6 +9,13 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 
 # ============================================
+# BOTÕES LIGAR/DESLIGAR ALERTAS
+# ============================================
+ALERTA_UP = True        # True = ligado / False = desligado
+ALERTA_DOWN = False     # True = ligado / False = desligado (DESLIGADO por padrão)
+
+
+# ============================================
 # ACEITAR SOMENTE PARES SPOT USDT
 # E BLOQUEAR FIAT / STABLES FRACAS / TOKENS LIXO
 # ============================================
@@ -195,31 +202,47 @@ async def monitorar_heatmap():
                     dec = decidir_direcao(info)
                     side, dom = dec["side"], dec["dominance"]
 
-                    if side in ("UP", "DOWN") and dom >= 0.55:
-                        cluster = info["cluster_up"] if side == "UP" else info["cluster_down"]
-                        if not cluster:
-                            continue
+                    # =====================================================
+                    # BOTÕES ON/OFF dos alertas
+                    # =====================================================
+                    if side == "UP" and ALERTA_UP:
+                        ativo_alerta = True
+                    elif side == "DOWN" and ALERTA_DOWN:
+                        ativo_alerta = True
+                    else:
+                        ativo_alerta = False
 
-                        alvo = cluster["price"]
-                        notional = cluster["notional"]
+                    if not ativo_alerta:
+                        continue
 
-                        if _pode_alertar(sym, side):
-                            if side == "UP":
-                                msg = (
-                                    f"🔥 HEATMAP {sym} — ALTA FORTE\n"
-                                    f"Preço: {mid:.6f} → Cluster: {alvo:.6f}\n"
-                                    f"Notional: ~{notional:,.0f} USDT | Dom: {dom*100:.1f}%\n\n"
-                                    f"Fluxo comprador dominante (entrada antecipada possível)"
-                                )
-                            else:
-                                msg = (
-                                    f"⚠️ HEATMAP {sym} — QUEDA FORTE\n"
-                                    f"Preço: {mid:.6f} → Cluster: {alvo:.6f}\n"
-                                    f"Notional: ~{notional:,.0f} USDT | Dom: {dom*100:.1f}%\n\n"
-                                    f"Pressão vendedora dominante (tendência imediata de queda)"
-                                )
+                    if dom < 0.55:
+                        continue
 
-                            await tg(session, msg)
+                    cluster = info["cluster_up"] if side == "UP" else info["cluster_down"]
+                    if not cluster:
+                        continue
+
+                    alvo = cluster["price"]
+                    notional = cluster["notional"]
+
+                    if _pode_alertar(sym, side):
+
+                        if side == "UP":
+                            msg = (
+                                f"🔥 HEATMAP {sym} — ALTA FORTE\n"
+                                f"Preço: {mid:.6f} → Cluster: {alvo:.6f}\n"
+                                f"Notional: ~{notional:,.0f} USDT | Dom: {dom*100:.1f}%\n\n"
+                                f"Fluxo comprador dominante (entrada antecipada possível)"
+                            )
+                        else:
+                            msg = (
+                                f"⚠️ HEATMAP {sym} — QUEDA FORTE\n"
+                                f"Preço: {mid:.6f} → Cluster: {alvo:.6f}\n"
+                                f"Notional: ~{notional:,.0f} USDT | Dom: {dom*100:.1f}%\n\n"
+                                f"Pressão vendedora dominante (tendência imediata de queda)"
+                            )
+
+                        await tg(session, msg)
 
                 except Exception as e:
                     print(f"[{br_time()}] [HEATMAP-ERROR] {sym}: {e}")
