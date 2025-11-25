@@ -1,4 +1,4 @@
-# heatmap_monitor.py — Monitor simples para detectar FUNDO REAL
+# heatmap_monitor.py — Detector simples de FUNDO (queda + lateral + virada)
 import os, asyncio, aiohttp, time, threading
 from datetime import datetime
 
@@ -7,183 +7,224 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-
-# =====================================================
-# ATIVAR / DESATIVAR ALERTAS
-# =====================================================
-ALERTA_FUNDO = True   # alerta de fundo ATIVO
-ALERTA_TOPO  = False  # alerta de topo DESLIGADO
-
-
-# =====================================================
-# FILTRO DE MOEDAS SPOT USDT (SEM FIAT / STABLE FRACA)
-# =====================================================
+# =============================
+# FILTROS DE PARES (SPOT/USDT)
+# =============================
 BLOQUEIO_BASE = (
-    "EUR", "BRL", "TRY", "GBP", "AUD", "CAD", "CHF", "RUB",
-    "MXN", "ZAR", "BKRW", "BVND", "IDRT",
-    "FDUSD", "BUSD", "TUSD", "USDC", "USDP", "USDE", "PAXG"
+    "EUR","BRL","TRY","GBP","AUD","CAD","CHF","RUB",
+    "MXN","ZAR","BKRW","BVND","IDRT",
+    "FDUSD","BUSD","TUSD","USDC","USDP","USDE","PAXG"
 )
-
-PADROES_LIXO = (
-    "USD1", "FUSD", "BFUSD",
-    "HEDGE", "BEAR", "BULL", "DOWN", "UP",
-    "WLF", "OLD"
-)
-
-
-async def carregar_pairs_validos():
-    async with aiohttp.ClientSession() as s:
-        data = await (await s.get(f"{BINANCE}/api/v3/exchangeInfo")).json()
-        pares = []
-
-        for sym in data["symbols"]:
-            if sym["status"] != "TRADING": continue
-            if sym["quoteAsset"] != "USDT": continue
-
-            base = sym["baseAsset"]
-            if base in BLOQUEIO_BASE: continue
-            if any(p in base for p in PADROES_LIXO): continue
-
-            pares.append(sym["symbol"])
-
-        return pares
-
+PADROES_LIXO = ("USD1","FUSD","BFUSD","HEDGE","BEAR","BULL","DOWN","UP","WLF","OLD")
 
 PAIRS = []
-INTERVALO = 60
-COOLDOWN = 900
 
+# =============================
+# PARÂMETROS (SIMPLES E DIRETOS)
+# =============================
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "20"))        # s entre varreduras
+TF = os.getenv("TF", "5m")                                   # timeframe (5m)
+KLINES_LIMIT = int(os.getenv("KLINES_LIMIT", "120"))         # velas baixadas
 
-# PARA NÃO REPETIR ALERTA
-last_alert = {}
-ultima_direcao = {}
+# 1) Queda mínima (do topo recente até o preço atual) para considerar "fundo"
+DROP_LOOKBACK = int(os.getenv("DROP_LOOKBACK", "48"))        # ~4h em 5m
+DROP_MIN_PCT = float(os.getenv("DROP_MIN_PCT", "7.5"))       # queda mínima (%)
 
+# 2) Lateralização curta (range apertado)
+SIDEWAYS_LOOKBACK = int(os.getenv("SIDEWAYS_LOOKBACK", "12"))  # ~1h em 5m
+SIDEWAYS_MAX_RANGE_PCT = float(os.getenv("SIDEWAYS_MAX_RANGE_PCT", "1.2"))  # %
 
+# 3) Virada: 2 velas de alta + volume acima da média simples
+TURN_MIN_GREEN_CANDLES = int(os.getenv("TURN_MIN_GREEN_CANDLES", "2"))
+VOL_MA_WINDOW = int(os.getenv("VOL_MA_WINDOW", "20"))
+VOL_MIN_FACTOR = float(os.getenv("VOL_MIN_FACTOR", "1.20"))   # vol atual >= 1.2x média
+
+# 4) Cooldown por par (para não spammar)
+ALERT_COOLDOWN = int(os.getenv("ALERT_COOLDOWN", "1800"))     # 30 min
+
+_last_alert = {}  # symbol -> ts do último alerta
+
+# =============================
+# UTIL
+# =============================
 def br_time():
     return datetime.now().strftime("%H:%M:%S")
 
-
-async def tg(session, msg):
+async def tg(session, msg: str):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print(f"[{br_time()}] (TG OFF) {msg}")
+        print(f"[{br_time()}] [TG-OFF] {msg}")
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    await session.post(url, json={"chat_id": CHAT_ID, "text": msg})
-
-
-# =====================================================
-# BUSCAR OHLC SIMPLES (KLINES)
-# =====================================================
-async def get_ohlc(session, sym):
-    url = f"{BINANCE}/api/v3/klines"
-    params = {"symbol": sym, "interval": "5m", "limit": 5}
-
+    payload = {"chat_id": CHAT_ID, "text": msg}
     try:
-        js = await (await session.get(url, params=params)).json()
-        return js
-    except:
+        async with session.post(url, json=payload, timeout=10):
+            pass
+    except Exception as e:
+        print(f"[{br_time()}] [TG-ERROR] {e}")
+
+async def get_json(session, url, params=None, timeout=15):
+    for _ in range(2):
+        try:
+            async with session.get(url, params=params, timeout=timeout) as r:
+                return await r.json()
+        except Exception:
+            await asyncio.sleep(0.25)
+    return None
+
+# =============================
+# PARES VÁLIDOS
+# =============================
+async def carregar_pairs_validos():
+    async with aiohttp.ClientSession() as s:
+        data = await get_json(s, f"{BINANCE}/api/v3/exchangeInfo")
+        ativos = []
+        for sym in data.get("symbols", []):
+            if sym.get("status") != "TRADING":
+                continue
+            if sym.get("quoteAsset") != "USDT":
+                continue
+            base = sym.get("baseAsset","")
+            if base in BLOQUEIO_BASE:
+                continue
+            if any(p in base for p in PADROES_LIXO):
+                continue
+            ativos.append(sym["symbol"])
+        return ativos
+
+# =============================
+# KLINES
+# =============================
+async def fetch_klines(session, symbol, interval=TF, limit=KLINES_LIMIT):
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    return await get_json(session, f"{BINANCE}/api/v3/klines", params=params)
+
+def sma(arr, n):
+    if len(arr) < n or n <= 0: 
+        return 0.0
+    return sum(arr[-n:]) / float(n)
+
+# =============================
+# LÓGICA DO FUNDO (simples)
+# Queda forte -> lateral curta -> virada com volume
+# =============================
+def detectar_fundo(kl):
+    """
+    kl: lista de velas no formato da Binance:
+        [ open_time, open, high, low, close, volume, ... ]
+    Retorna dict ou None.
+    """
+    if not kl or len(kl) < max(DROP_LOOKBACK, SIDEWAYS_LOOKBACK, VOL_MA_WINDOW) + 3:
         return None
 
+    closes = [float(x[4]) for x in kl]
+    highs  = [float(x[2]) for x in kl]
+    lows   = [float(x[3]) for x in kl]
+    vols   = [float(x[5]) for x in kl]
 
-# =====================================================
-# LÓGICA DO ALERTA DE FUNDO (SIMPLIFICADO)
-# =====================================================
-def detectar_fundo(klines):
-    # Pegando candles
-    c1 = klines[-1]  # atual
-    c2 = klines[-2]
-    c3 = klines[-3]
-    c4 = klines[-4]
+    last = closes[-1]
 
-    # convertendo
-    def conv(c): 
-        return float(c[1]), float(c[2]), float(c[3]), float(c[4])
+    # 1) Queda forte a partir do topo dos últimos N candles
+    recent_high = max(highs[-DROP_LOOKBACK:])
+    if recent_high <= 0:
+        return None
+    drop_pct = (recent_high - last) / recent_high * 100.0
+    if drop_pct < DROP_MIN_PCT:
+        return None
 
-    o1,h1,l1,cl1 = conv(c1)
-    o2,h2,l2,cl2 = conv(c2)
-    o3,h3,l3,cl3 = conv(c3)
-    o4,h4,l4,cl4 = conv(c4)
+    # 2) Lateralização curta: range pequeno nos últimos L candles
+    sw_max = max(closes[-SIDEWAYS_LOOKBACK:])
+    sw_min = min(closes[-SIDEWAYS_LOOKBACK:])
+    range_pct = (sw_max - sw_min) / last * 100.0 if last > 0 else 999.0
+    if range_pct > SIDEWAYS_MAX_RANGE_PCT:
+        return None
 
-    # queda forte
-    queda_forte = (cl2 < o2) and (o2 - cl2 > (h2 - l2) * 0.50)
+    # 3) Virada: últimas N velas verdes + volume atual acima da média
+    green_ok = True
+    for i in range(1, TURN_MIN_GREEN_CANDLES + 1):
+        if closes[-i] <= closes[-i-1]:
+            green_ok = False
+            break
+    if not green_ok:
+        return None
 
-    # lateralizou
-    lateral = (
-        abs(cl3 - cl2) < (h3 - l3)*0.25 and
-        abs(cl4 - cl3) < (h4 - l4)*0.25
-    )
+    vol_ma = sma(vols, VOL_MA_WINDOW)
+    if vol_ma <= 0:
+        return None
+    if vols[-1] < VOL_MIN_FACTOR * vol_ma:
+        return None
 
-    # primeiro candle de reversão
-    reversao = cl1 > o1 and l1 > l2
+    # Informações úteis
+    swing_low = min(lows[-SIDEWAYS_LOOKBACK:])
+    swing_high = max(highs[-SIDEWAYS_LOOKBACK:])
+    return {
+        "price": last,
+        "drop_pct": drop_pct,
+        "range_pct": range_pct,
+        "swing_low": swing_low,
+        "swing_high": swing_high,
+        "vol_now": vols[-1],
+        "vol_ma": vol_ma
+    }
 
-    if queda_forte and lateral and reversao:
+def _cooldown_ok(symbol):
+    now = time.time()
+    ts = _last_alert.get(symbol, 0)
+    if now - ts >= ALERT_COOLDOWN:
+        _last_alert[symbol] = now
         return True
-    
     return False
 
-
-
-def pode_alertar(sym):
-    t = time.time()
-    if sym not in last_alert:
-        last_alert[sym] = t
-        return True
-
-    if t - last_alert[sym] < COOLDOWN:
-        return False
-
-    last_alert[sym] = t
-    return True
-
-
-# =====================================================
-# MONITOR PRINCIPAL
-# =====================================================
-async def monitor():
+# =============================
+# MONITOR
+# =============================
+async def monitorar_fundos():
     global PAIRS
-
     if not PAIRS:
         PAIRS = await carregar_pairs_validos()
-        print(f"[{br_time()}] Monitorando: {PAIRS}")
+    print(f"[{br_time()}] [FUNDOS] Monitorando {len(PAIRS)} pares: {', '.join(PAIRS)}")
 
-    async with aiohttp.ClientSession() as s:
+    async with aiohttp.ClientSession() as session:
         while True:
             for sym in PAIRS:
                 try:
-                    kl = await get_ohlc(s, sym)
-                    if not kl: continue
+                    kl = await fetch_klines(session, sym)
+                    if not isinstance(kl, list) or len(kl) == 0:
+                        continue
 
-                    # DETECTAR FUNDO
-                    if ALERTA_FUNDO and detectar_fundo(kl):
+                    det = detectar_fundo(kl)
+                    if not det:
+                        continue
+                    if not _cooldown_ok(sym):
+                        continue
 
-                        if not pode_alertar(sym):
-                            continue
-
-                        preco = float(kl[-1][4])
-                        fundo = float(kl[-2][3])
-                        base = sym.replace("USDT", "")
-
-                        msg = (
-                            f"🔔 FUNDO DETECTADO\n\n"
-                            f"{base}\n\n"
-                            f"Preço atual: {preco:.6f}\n"
-                            f"Fundo recente: {fundo:.6f}\n"
-                            f"Primeiro candle de reversão confirmado\n"
-                            f"Possível início de movimento de alta."
-                        )
-                        await tg(s, msg)
+                    base = sym.replace("USDT","")
+                    msg = (
+                        "🟩 FUNDO POSSÍVEL DETECTADO\n\n"
+                        f"{base}\n\n"
+                        f"Preço atual: {det['price']:.6f}\n"
+                        f"Queda do topo recente: {det['drop_pct']:.1f}%\n"
+                        f"Lateralização (range): {det['range_pct']:.2f}%\n"
+                        f"Zona recente: {det['swing_low']:.6f} — {det['swing_high']:.6f}\n"
+                        f"Volume agora vs média: {det['vol_now']:.0f} / {det['vol_ma']:.0f}\n\n"
+                        "Leitura rápida: queda forte, range curto e virada com volume.\n"
+                        "⚠️ Confirme no gráfico (5m/15m): pavio de rejeição e sequência de velas verdes."
+                    )
+                    await tg(session, msg)
 
                 except Exception as e:
-                    print(f"[{br_time()}] ERRO {sym}: {e}")
+                    print(f"[{br_time()}] [FUNDOS-ERROR] {sym}: {e}")
 
-            await asyncio.sleep(INTERVALO)
+            await asyncio.sleep(SCAN_INTERVAL)
 
-
-
-def start():
-    threading.Thread(target=lambda: asyncio.run(monitor()), daemon=True).start()
-
+# =============================
+# STARTER (necessário para o main.py do Render)
+# =============================
+def start_heatmap_monitor():
+    def runner():
+        asyncio.run(monitorar_fundos())
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    return t
 
 if __name__ == "__main__":
-    asyncio.run(monitor())
+    asyncio.run(monitorar_fundos())
