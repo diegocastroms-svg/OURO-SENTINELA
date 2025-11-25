@@ -92,12 +92,26 @@ def rsi(values, period=14):
 
 
 # =========================
-# ALERTA DE FUNDO SIMPLES
+# ALERTA DE FUNDO SIMPLES (COM SMA200)
 # =========================
 _last_alert = {}
 
+def sma(values, period):
+    if len(values) < period:
+        return sum(values) / len(values)
+    return sum(values[-period:]) / period
+
+
 async def alerta_fundo(session, sym, closes):
-    if len(closes) < 40:
+    if len(closes) < 200:
+        return
+
+    # --- M200
+    m200 = sma(closes, 200)
+
+    # === REGRA PRINCIPAL ===
+    # Só alerta se o preço estiver ABAIXO da M200 (zona de fundo real)
+    if closes[-1] > m200:
         return
 
     ema9_now = ema(closes[-20:], 9)
@@ -106,13 +120,14 @@ async def alerta_fundo(session, sym, closes):
     rsi_now = rsi(closes)
     macd_line, hist = macd(closes)
 
-    queda_forte = closes[-1] < closes[-6] * 0.985     # queda ~1.5%
+    queda_forte = closes[-1] < closes[-6] * 0.985    # queda ~1.5%
     estabilizou = abs(closes[-1] - closes[-2]) <= closes[-1] * 0.003
     virada = ema9_now > ema20_now or (macd_line > 0 and hist > 0)
 
     if queda_forte and estabilizou and virada:
         now = time.time()
         last = _last_alert.get(sym, 0)
+
         if now - last > 900:  # cooldown 15 min
             _last_alert[sym] = now
 
@@ -122,7 +137,8 @@ async def alerta_fundo(session, sym, closes):
                 f"Preço: {closes[-1]:.6f}\n"
                 f"RSI: {rsi_now:.1f}\n"
                 f"MACD virando\n"
-                f"EMA9 possivelmente cruzando\n\n"
+                f"EMA9 possivelmente cruzando\n"
+                f"Abaixo da M200 (região de fundo)\n\n"
                 f"Queda forte + estabilização + início de reversão."
             )
 
