@@ -160,7 +160,7 @@ def decidir_direcao(info):
         return {"side": "UP", "dominance": up_n / (up_n + down_n)}
 
     if down_n > up_n * HEATMAP_MIN_DOMINANCE_RATIO:
-        return {"side": "DOWN", "dominance": down_n / (up_n + down_n)}
+        return {"side": "DOWN", "dominance": down_n / (down_n + up_n)}
 
     return {"side": "FLAT", "dominance": 0}
 
@@ -210,7 +210,6 @@ async def monitorar_heatmap():
                     side = dec["side"]
                     dom = dec["dominance"]
 
-                    # BOTÕES ON/OFF
                     if side == "UP" and not ALERTA_UP:
                         continue
                     if side == "DOWN" and not ALERTA_DOWN:
@@ -225,40 +224,41 @@ async def monitorar_heatmap():
                     if not cluster:
                         continue
 
-                    # ============================================
-                    # CONFIRMAÇÃO DUPLA
-                    # ============================================
                     prev = _confirmacao.get(sym)
 
                     if prev != side:
                         _confirmacao[sym] = side
-                        continue  # primeira confirmação
+                        continue
 
-                    # segunda confirmação → passa
                     _confirmacao[sym] = side
 
-                    # ============================================
-                    # COOLDOWN
-                    # ============================================
                     if not _pode_alertar(sym, side):
                         continue
 
                     alvo = cluster["price"]
                     notional = cluster["notional"]
 
+                    base = sym.replace("USDT", "")
+
                     if side == "UP":
                         msg = (
-                            f"🔥 HEATMAP {sym} — ALTA FORTE\n"
-                            f"Preço: {mid:.6f} → Cluster: {alvo:.6f}\n"
-                            f"Notional: ~{notional:,.0f} USDT | Dom: {dom*100:.1f}%\n\n"
-                            f"Confirmação dupla concluída — Alta REAL"
+                            f"🔥 ENTRADA REAL DETECTADA\n\n"
+                            f"**{base}**\n\n"
+                            f"Preço Médio: {mid:.6f}\n"
+                            f"Cluster em: {alvo:.6f}\n"
+                            f"Notional: ~{notional:,.0f} USDT\n"
+                            f"Dominância: {dom*100:.1f}%\n\n"
+                            f"Fluxo comprador dominante — possível movimento de continuação."
                         )
                     else:
                         msg = (
-                            f"⚠️ HEATMAP {sym} — QUEDA FORTE\n"
-                            f"Preço: {mid:.6f} → Cluster: {alvo:.6f}\n"
-                            f"Notional: ~{notional:,.0f} USDT | Dom: {dom*100:.1f}%\n\n"
-                            f"Confirmação dupla concluída — Queda REAL"
+                            f"⚠️ SAÍDA REAL DETECTADA\n\n"
+                            f"**{base}**\n\n"
+                            f"Preço Médio: {mid:.6f}\n"
+                            f"Cluster em: {alvo:.6f}\n"
+                            f"Notional: ~{notional:,.0f} USDT\n"
+                            f"Dominância: {dom*100:.1f}%\n\n"
+                            f"Pressão vendedora dominante — risco imediato de queda."
                         )
 
                     await tg(session, msg)
