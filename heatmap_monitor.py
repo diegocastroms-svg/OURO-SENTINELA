@@ -1,4 +1,4 @@
-# heatmap_monitor.py — Monitor de clusters (heatmap) com alerta único e dinâmico
+# heatmap_monitor.py — Monitor simples para detectar FUNDO REAL
 import os, asyncio, aiohttp, time, threading
 from datetime import datetime
 
@@ -8,17 +8,16 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 
-# ============================================
-# BOTÕES LIGAR/DESLIGAR ALERTAS
-# ============================================
-ALERTA_UP = False        # True = ligado / False = desligado
-ALERTA_DOWN = False     # True = ligado / False = desligado (DESLIGADO por padrão)
+# =====================================================
+# ATIVAR / DESATIVAR ALERTAS
+# =====================================================
+ALERTA_FUNDO = True   # alerta de fundo ATIVO
+ALERTA_TOPO  = False  # alerta de topo DESLIGADO
 
 
-# ============================================
-# ACEITAR SOMENTE PARES SPOT USDT
-# E BLOQUEAR FIAT / STABLES FRACAS / TOKENS LIXO
-# ============================================
+# =====================================================
+# FILTRO DE MOEDAS SPOT USDT (SEM FIAT / STABLE FRACA)
+# =====================================================
 BLOQUEIO_BASE = (
     "EUR", "BRL", "TRY", "GBP", "AUD", "CAD", "CHF", "RUB",
     "MXN", "ZAR", "BKRW", "BVND", "IDRT",
@@ -34,47 +33,30 @@ PADROES_LIXO = (
 
 async def carregar_pairs_validos():
     async with aiohttp.ClientSession() as s:
-        url = f"{BINANCE}/api/v3/exchangeInfo"
-        r = await s.get(url)
-        data = await r.json()
+        data = await (await s.get(f"{BINANCE}/api/v3/exchangeInfo")).json()
+        pares = []
 
-        ativos = []
         for sym in data["symbols"]:
-
-            if sym["status"] != "TRADING":
-                continue
-
-            if sym["quoteAsset"] != "USDT":
-                continue
+            if sym["status"] != "TRADING": continue
+            if sym["quoteAsset"] != "USDT": continue
 
             base = sym["baseAsset"]
+            if base in BLOQUEIO_BASE: continue
+            if any(p in base for p in PADROES_LIXO): continue
 
-            if base in BLOQUEIO_BASE:
-                continue
+            pares.append(sym["symbol"])
 
-            if any(p in base for p in PADROES_LIXO):
-                continue
-
-            ativos.append(sym["symbol"])
-
-        return ativos
+        return pares
 
 
 PAIRS = []
+INTERVALO = 60
+COOLDOWN = 900
 
 
-# CONFIG
-HEATMAP_INTERVAL = int(os.getenv("HEATMAP_INTERVAL", "60"))
-HEATMAP_MAX_DIST_PCT = float(os.getenv("HEATMAP_MAX_DIST_PCT", "0.10"))
-HEATMAP_MIN_CLUSTER_USD = float(os.getenv("HEATMAP_MIN_CLUSTER_USD", "150000"))
-HEATMAP_MIN_DOMINANCE_RATIO = float(os.getenv("HEATMAP_MIN_DOMINANCE_RATIO", "1.3"))
-HEATMAP_ALERT_COOLDOWN = int(os.getenv("HEATMAP_ALERT_COOLDOWN", "900"))
-
-_last_alert = {}
-
-
-# CONFIRMAÇÃO DUPLA
-_confirmacao = {}
+# PARA NÃO REPETIR ALERTA
+last_alert = {}
+ultima_direcao = {}
 
 
 def br_time():
@@ -83,201 +65,125 @@ def br_time():
 
 async def tg(session, msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print(f"[{br_time()}] [TG-OFF] {msg}")
+        print(f"[{br_time()}] (TG OFF) {msg}")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg}
+    await session.post(url, json={"chat_id": CHAT_ID, "text": msg})
+
+
+# =====================================================
+# BUSCAR OHLC SIMPLES (KLINES)
+# =====================================================
+async def get_ohlc(session, sym):
+    url = f"{BINANCE}/api/v3/klines"
+    params = {"symbol": sym, "interval": "5m", "limit": 5}
+
     try:
-        async with session.post(url, json=payload, timeout=10):
-            pass
-    except Exception as e:
-        print(f"[{br_time()}] [TG-ERROR] {e}")
+        js = await (await session.get(url, params=params)).json()
+        return js
+    except:
+        return None
 
 
-async def get_json(session, url, params=None, timeout=15):
-    for _ in range(2):
-        try:
-            async with session.get(url, params=params, timeout=timeout) as r:
-                return await r.json()
-        except Exception:
-            await asyncio.sleep(0.3)
-    return None
+# =====================================================
+# LÓGICA DO ALERTA DE FUNDO (SIMPLIFICADO)
+# =====================================================
+def detectar_fundo(klines):
+    # Pegando candles
+    c1 = klines[-1]  # atual
+    c2 = klines[-2]
+    c3 = klines[-3]
+    c4 = klines[-4]
 
+    # convertendo
+    def conv(c): 
+        return float(c[1]), float(c[2]), float(c[3]), float(c[4])
 
-async def fetch_depth(session, sym, limit=100):
-    return await get_json(
-        session,
-        f"{BINANCE}/api/v3/depth",
-        {"symbol": sym, "limit": limit},
+    o1,h1,l1,cl1 = conv(c1)
+    o2,h2,l2,cl2 = conv(c2)
+    o3,h3,l3,cl3 = conv(c3)
+    o4,h4,l4,cl4 = conv(c4)
+
+    # queda forte
+    queda_forte = (cl2 < o2) and (o2 - cl2 > (h2 - l2) * 0.50)
+
+    # lateralizou
+    lateral = (
+        abs(cl3 - cl2) < (h3 - l3)*0.25 and
+        abs(cl4 - cl3) < (h4 - l4)*0.25
     )
 
+    # primeiro candle de reversão
+    reversao = cl1 > o1 and l1 > l2
 
-def analisar_book(depth, mid_price):
-    asks = [(float(p), float(q)) for p, q in depth["asks"]]
-    bids = [(float(p), float(q)) for p, q in depth["bids"]]
-
-    max_up, max_down = None, None
-    max_dist = mid_price * HEATMAP_MAX_DIST_PCT
-
-    for p, q in asks:
-        if p <= mid_price: continue
-        if p - mid_price > max_dist: continue
-        notional = p * q
-        if notional < HEATMAP_MIN_CLUSTER_USD: continue
-        if (max_up is None) or (notional > max_up["notional"]):
-            max_up = {"price": p, "notional": notional}
-
-    for p, q in bids:
-        if p >= mid_price: continue
-        if mid_price - p > max_dist: continue
-        notional = p * q
-        if notional < HEATMAP_MIN_CLUSTER_USD: continue
-        if (max_down is None) or (notional > max_down["notional"]):
-            max_down = {"price": p, "notional": notional}
-
-    return {"cluster_up": max_up, "cluster_down": max_down}
-
-
-def decidir_direcao(info):
-    up = info["cluster_up"]
-    down = info["cluster_down"]
-
-    if not up and not down:
-        return {"side": "FLAT", "dominance": 0}
-
-    if up and not down:
-        return {"side": "UP", "dominance": 1}
-
-    if down and not up:
-        return {"side": "DOWN", "dominance": 1}
-
-    up_n = up["notional"]
-    down_n = down["notional"]
-
-    if up_n > down_n * HEATMAP_MIN_DOMINANCE_RATIO:
-        return {"side": "UP", "dominance": up_n / (up_n + down_n)}
-
-    if down_n > up_n * HEATMAP_MIN_DOMINANCE_RATIO:
-        return {"side": "DOWN", "dominance": down_n / (down_n + up_n)}
-
-    return {"side": "FLAT", "dominance": 0}
+    if queda_forte and lateral and reversao:
+        return True
+    
+    return False
 
 
 
-def _pode_alertar(symbol, side):
-    now = time.time()
-    info = _last_alert.get(symbol)
-
-    if not info:
-        _last_alert[symbol] = {"ts": now, "side": side}
+def pode_alertar(sym):
+    t = time.time()
+    if sym not in last_alert:
+        last_alert[sym] = t
         return True
 
-    if info["side"] != side:
-        _last_alert[symbol] = {"ts": now, "side": side}
-        return True
-
-    if now - info["ts"] < HEATMAP_ALERT_COOLDOWN:
+    if t - last_alert[sym] < COOLDOWN:
         return False
 
-    _last_alert[symbol] = {"ts": now, "side": side}
+    last_alert[sym] = t
     return True
 
 
-
-async def monitorar_heatmap():
+# =====================================================
+# MONITOR PRINCIPAL
+# =====================================================
+async def monitor():
     global PAIRS
 
     if not PAIRS:
         PAIRS = await carregar_pairs_validos()
+        print(f"[{br_time()}] Monitorando: {PAIRS}")
 
-    print(f"[{br_time()}] [HEATMAP] Ativo para: {', '.join(PAIRS)}")
-
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession() as s:
         while True:
             for sym in PAIRS:
                 try:
-                    depth = await fetch_depth(session, sym)
-                    if not depth: continue
+                    kl = await get_ohlc(s, sym)
+                    if not kl: continue
 
-                    best_bid = float(depth["bids"][0][0])
-                    best_ask = float(depth["asks"][0][0])
-                    mid = (best_bid + best_ask) / 2
+                    # DETECTAR FUNDO
+                    if ALERTA_FUNDO and detectar_fundo(kl):
 
-                    info = analisar_book(depth, mid)
-                    dec = decidir_direcao(info)
-                    side = dec["side"]
-                    dom = dec["dominance"]
+                        if not pode_alertar(sym):
+                            continue
 
-                    if side == "UP" and not ALERTA_UP:
-                        continue
-                    if side == "DOWN" and not ALERTA_DOWN:
-                        continue
-                    if side == "FLAT":
-                        continue
+                        preco = float(kl[-1][4])
+                        fundo = float(kl[-2][3])
+                        base = sym.replace("USDT", "")
 
-                    if dom < 0.55:
-                        continue
-
-                    cluster = info["cluster_up"] if side == "UP" else info["cluster_down"]
-                    if not cluster:
-                        continue
-
-                    prev = _confirmacao.get(sym)
-
-                    if prev != side:
-                        _confirmacao[sym] = side
-                        continue
-
-                    _confirmacao[sym] = side
-
-                    if not _pode_alertar(sym, side):
-                        continue
-
-                    alvo = cluster["price"]
-                    notional = cluster["notional"]
-
-                    base = sym.replace("USDT", "")
-
-                    if side == "UP":
                         msg = (
-                            f"🔥 ENTRADA REAL DETECTADA\n\n"
+                            f"🔔 FUNDO DETECTADO\n\n"
                             f"{base}\n\n"
-                            f"Preço Atual: {mid:.6f}\n"
-                            f"Ordem de compra acima do preço atual: {alvo:.6f}\n"
-                            f"Total de compra acima do preço atual: ~{notional:,.0f} USDT\n"
-                            f"Dominância compradora: {dom*100:.1f}%\n\n"
-                            f"Fluxo comprador dominante — possível movimento de continuação."
+                            f"Preço atual: {preco:.6f}\n"
+                            f"Fundo recente: {fundo:.6f}\n"
+                            f"Primeiro candle de reversão confirmado\n"
+                            f"Possível início de movimento de alta."
                         )
-                    else:
-                        msg = (
-                            f"⚠️ SAÍDA REAL DETECTADA\n\n"
-                            f"{base}\n\n"
-                            f"Preço Atual: {mid:.6f}\n"
-                            f"Ordem de venda abaixo do preço atual: {alvo:.6f}\n"
-                            f"Total de venda abaixo do preço atual: ~{notional:,.0f} USDT\n"
-                            f"Dominância vendedora: {dom*100:.1f}%\n\n"
-                            f"Pressão vendedora dominante — risco imediato de queda."
-                        )
-
-                    await tg(session, msg)
+                        await tg(s, msg)
 
                 except Exception as e:
-                    print(f"[{br_time()}] [HEATMAP-ERROR] {sym}: {e}")
+                    print(f"[{br_time()}] ERRO {sym}: {e}")
 
-            await asyncio.sleep(HEATMAP_INTERVAL)
+            await asyncio.sleep(INTERVALO)
 
 
 
-def start_heatmap_monitor():
-    def runner():
-        asyncio.run(monitorar_heatmap())
-
-    t = threading.Thread(target=runner, daemon=True)
-    t.start()
-    return t
-
+def start():
+    threading.Thread(target=lambda: asyncio.run(monitor()), daemon=True).start()
 
 
 if __name__ == "__main__":
-    asyncio.run(monitorar_heatmap())
+    asyncio.run(monitor())
