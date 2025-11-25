@@ -1,5 +1,6 @@
-import os, asyncio, aiohttp, time
+import os, asyncio, aiohttp, time, threading
 from datetime import datetime
+from flask import Flask
 
 # =========================
 # CONFIG
@@ -12,6 +13,20 @@ MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
+
+# =========================
+# FLASK (Render exige)
+# =========================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "OURO-SENTINELA ATIVO", 200
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
 
 # =========================
 # FUNÇÕES BÁSICAS
@@ -39,12 +54,13 @@ async def get_json(session, url, params=None):
 async def fetch_24hr(session):
     return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
 
-async def fetch_klines(session, sym, interval="5m", limit=120):
+async def fetch_klines(session, sym, interval="5m", limit=200):
     return await get_json(
         session,
         f"{BINANCE}/api/v3/klines",
         {"symbol": sym, "interval": interval, "limit": limit}
     )
+
 
 # =========================
 # INDICADORES
@@ -75,6 +91,7 @@ def rsi(values, period=14):
     al = sum(losses[-period:]) / period or 1e-9
     return 100 - (100 / (1 + ag/al))
 
+
 # =========================
 # ALERTA DE FUNDO
 # =========================
@@ -82,12 +99,11 @@ _last_alert = {}
 
 async def alerta_fundo(session, sym, closes):
     if len(closes) < 40:
-        print(f"[{now()}] Ignorado {sym}: dados insuficientes")
+        print(f"[{now()}] Ignorado {sym}: poucos dados")
         return
 
     ema200 = ema(closes[-200:], 200) if len(closes) >= 200 else closes[-1] + 999
 
-    # só alerta se estiver abaixo da 200
     if closes[-1] > ema200:
         return
 
@@ -105,6 +121,7 @@ async def alerta_fundo(session, sym, closes):
         last = _last_alert.get(sym, 0)
         if nowt - last < 900:
             return
+
         _last_alert[sym] = nowt
 
         msg = (
@@ -112,22 +129,20 @@ async def alerta_fundo(session, sym, closes):
             f"{sym}\n"
             f"Preço: {closes[-1]:.6f}\n"
             f"RSI: {rsi_now:.1f}\n"
-            f"MACD virando | EMA9 x EMA20\n"
+            f"MACD virando | EMA9>EMA20\n"
             f"Abaixo da M200\n"
             f"Queda forte + estabilização + reversão."
         )
         await send(msg)
         print(f"[{now()}] ALERTA ENVIADO: {sym}")
 
+
 # =========================
 # LOOP PRINCIPAL
 # =========================
 async def monitor_loop():
     await send("🟢 OURO-SENTINELA INICIADO")
-
-    print("====================================")
-    print(" OURO-SENTINELA RODANDO NO RENDER...")
-    print("====================================")
+    print("OURO-SENTINELA RODANDO...")
 
     while True:
         try:
@@ -135,17 +150,16 @@ async def monitor_loop():
 
                 data24 = await fetch_24hr(s)
                 if not data24 or isinstance(data24, dict):
-                    print(f"[{now()}] Erro ao puxar 24hr")
+                    print(f"[{now()}] Erro ao puxar 24h")
                     await asyncio.sleep(5)
                     continue
 
                 allow = set(PAIRS.split(",")) if PAIRS else None
-                pool = []
 
+                pool = []
                 for x in data24:
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
-
                     if not sym or not vol:
                         continue
                     if not sym.endswith("USDT"):
@@ -166,7 +180,6 @@ async def monitor_loop():
                     kl = await fetch_klines(s, sym, "5m", 200)
                     if not kl:
                         continue
-
                     closes = [float(k[4]) for k in kl]
                     await alerta_fundo(s, sym, closes)
 
@@ -176,8 +189,19 @@ async def monitor_loop():
             print(f"[{now()}] LOOP ERRO: {e}")
             await asyncio.sleep(5)
 
+
 # =========================
-# RODAR DIRETO
+# THREAD PARA RODAR O BOT
+# =========================
+def start_bot():
+    asyncio.run(monitor_loop())
+
+t = threading.Thread(target=start_bot, daemon=True)
+t.start()
+
+
+# =========================
+# FLASK RODANDO PARA O RENDER ACEITAR
 # =========================
 if __name__ == "__main__":
-    asyncio.run(monitor_loop())
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
