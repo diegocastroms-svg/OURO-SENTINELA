@@ -6,23 +6,20 @@ from flask import Flask
 # CONFIG
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "3000"))   # monitora praticamente todas
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
-MIN_QV_USDT = 2_000_000   # <<<<<<<<<<<< ALTERADO PARA 2 MILHÕES
+TOP_N = 200  # monitora praticamente tudo
+SCAN_INTERVAL = 60
+MIN_QV_USDT = 2_000_000  # volume mínimo 2 milhões
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
-PAIRS = os.getenv("PAIRS", "").strip()
 
-# BLOQUEIO DE FIAT / STABLES FRACAS / MOEDAS MORTAS
-BLOQUEIO = (
-    "USDC","BUSD","FDUSD","USDP","USDE","TUSD",
-    "EUR","BRL","TRY","GBP","AUD","CAD","CHF",
-    "MXN","ZAR","RUB","IDRT","BVND","BKRW"
-)
+MOEDAS_MORTAS = [
+    "USDC", "USDT", "FDUSD", "TUSD", "BUSD", "EUR", "BRL",
+    "TRY", "GBP", "AUD", "CAD", "RUB", "UAH", "VAI", "DAI",
+]
 
 # =========================
-# FLASK (Render exige)
+# FLASK
 # =========================
 app = Flask(__name__)
 
@@ -36,7 +33,7 @@ def health():
 
 
 # =========================
-# FUNÇÕES BÁSICAS
+# FUNÇÕES
 # =========================
 def now():
     return datetime.now().strftime("%H:%M:%S")
@@ -72,76 +69,63 @@ async def fetch_klines(session, sym, interval="5m", limit=200):
 # =========================
 # INDICADORES
 # =========================
-def ema(values, period):
-    k = 2 / (period + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = v * k + e * (1 - k)
-    return e
-
-def macd(values):
-    if len(values) < 35:
-        return 0, 0
-    fast = ema(values[-26:], 12)
-    slow = ema(values[-35:], 26)
-    line = fast - slow
-    signal = ema([line]*9, 9)
-    hist = line - signal
-    return line, hist
-
-def rsi(values, period=14):
-    if len(values) < period + 1:
-        return 50
-    gains = [max(values[i] - values[i-1], 0) for i in range(1, len(values))]
-    losses = [max(values[i-1] - values[i], 0) for i in range(1, len(values))]
-    ag = sum(gains[-period:]) / period
-    al = sum(losses[-period:]) / period or 1e-9
-    return 100 - (100 / (1 + ag/al))
+def ma(values, period):
+    if len(values) < period:
+        return values[-1] + 999999
+    return sum(values[-period:]) / period
 
 
 # =========================
-# ALERTA DE FUNDO
+# ALERTA DE FUNDO — VELAS PEQUENAS + CANDLE FORTE 2×
 # =========================
 _last_alert = {}
 
 async def alerta_fundo(session, sym, closes):
-    if len(closes) < 40:
-        print(f"[{now()}] Ignorado {sym}: poucos dados")
+
+    if len(closes) < 210:
         return
 
-    ema200 = ema(closes[-200:], 200) if len(closes) >= 200 else closes[-1] + 999
+    # MA200
+    ma200 = ma(closes, 200)
 
-    if closes[-1] > ema200:
+    # abaixo da 200
+    if closes[-1] > ma200:
         return
 
-    ema9 = ema(closes[-20:], 9)
-    ema20 = ema(closes[-20:], 20)
-    rsi_now = rsi(closes)
-    macd_line, hist = macd(closes)
+    # === 2) compressão ===
+    corpos = [abs(closes[i] - closes[i-1]) for i in range(-6, -1)]
+    if not all(c < closes[-1] * 0.004 for c in corpos):
+        return
 
-    queda_forte = closes[-1] < closes[-6] * 0.985
-    estabilizou = abs(closes[-1] - closes[-2]) <= closes[-1] * 0.003
-    virada = ema9 > ema20 or (macd_line > 0 and hist > 0)
+    media_corpos = sum(corpos) / len(corpos)
 
-    if queda_forte and estabilizou and virada:
-        nowt = time.time()
-        last = _last_alert.get(sym, 0)
-        if nowt - last < 900:
-            return
+    # === 3) candle forte 2× ===
+    corpo_atual = abs(closes[-1] - closes[-2])
+    if corpo_atual < media_corpos * 2:
+        return
 
-        _last_alert[sym] = nowt
+    # === 4) rompendo pra cima ===
+    if closes[-1] <= closes[-2]:
+        return
 
-        msg = (
-            f"🔔 POSSÍVEL FUNDO DETECTADO\n\n"
-            f"{sym}\n"
-            f"Preço: {closes[-1]:.6f}\n"
-            f"RSI: {rsi_now:.1f}\n"
-            f"MACD virando | EMA9>EMA20\n"
-            f"Abaixo da M200\n"
-            f"Queda forte + estabilização + reversão."
-        )
-        await send(msg)
-        print(f"[{now()}] ALERTA ENVIADO: {sym}")
+    # === cooldown ===
+    ts = time.time()
+    if ts - _last_alert.get(sym, 0) < 900:
+        return
+
+    _last_alert[sym] = ts
+
+    msg = (
+        f"🔔 FUNDO DETECTADO\n\n"
+        f"{sym}\n"
+        f"Preço: {closes[-1]:.6f}\n"
+        f"Abaixo da MA200\n"
+        f"Compressão (velas pequenas)\n"
+        f"Candle forte 2× maior\n"
+        f"Rompimento pra cima\n"
+    )
+    await send(msg)
+    print(f"[{now()}] ALERTA ENVIADO: {sym}")
 
 
 # =========================
@@ -149,15 +133,16 @@ async def alerta_fundo(session, sym, closes):
 # =========================
 async def monitor_loop():
     await send("🟢 OURO-SENTINELA INICIADO")
+
     print("OURO-SENTINELA RODANDO...")
 
     while True:
         try:
             async with aiohttp.ClientSession() as s:
-
                 data24 = await fetch_24hr(s)
-                if not data24 or isinstance(data24, dict):
-                    print(f"[{now()}] Erro 24h")
+
+                if not data24:
+                    print(f"[{now()}] Erro ao puxar 24h")
                     await asyncio.sleep(5)
                     continue
 
@@ -170,13 +155,12 @@ async def monitor_loop():
                     if not sym or not vol:
                         continue
 
-                    # Apenas SPOT USDT
+                    # spot usdt only
                     if not sym.endswith("USDT"):
                         continue
 
-                    # Bloqueio de moedas mortas / fiat / stable fracas
-                    base = sym.replace("USDT", "")
-                    if base in BLOQUEIO:
+                    # bloqueio automático de moedas mortas
+                    if any(sym.startswith(m) for m in MOEDAS_MORTAS):
                         continue
 
                     try:
@@ -185,7 +169,7 @@ async def monitor_loop():
                     except:
                         pass
 
-                symbols = [s for s, _ in pool]  # monitora TODAS
+                symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
 
                 print(f"[{now()}] Monitorando {len(symbols)} pares...")
 
@@ -193,7 +177,9 @@ async def monitor_loop():
                     kl = await fetch_klines(s, sym, "5m", 200)
                     if not kl:
                         continue
+
                     closes = [float(k[4]) for k in kl]
+
                     await alerta_fundo(s, sym, closes)
 
                 await asyncio.sleep(SCAN_INTERVAL)
@@ -203,9 +189,8 @@ async def monitor_loop():
             await asyncio.sleep(5)
 
 
-
 # =========================
-# THREAD PARA RODAR O BOT
+# THREAD + FLASK
 # =========================
 def start_bot():
     asyncio.run(monitor_loop())
@@ -213,9 +198,5 @@ def start_bot():
 t = threading.Thread(target=start_bot, daemon=True)
 t.start()
 
-
-# =========================
-# FLASK RODANDO
-# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
