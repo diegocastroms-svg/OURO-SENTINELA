@@ -1,9 +1,8 @@
-import os, asyncio, aiohttp, time, threading, statistics, csv
+import os, asyncio, aiohttp, time
 from datetime import datetime
-from flask import Flask, send_file, Response
 
 # =========================
-# CONFIGURAÇÃO
+# CONFIG
 # =========================
 BINANCE = "https://api.binance.com"
 TOP_N = int(os.getenv("TOP_N", "30"))
@@ -14,82 +13,67 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
 
-CSV_FILE = "dados_coletados.csv"
-
 # =========================
-# APP WEB
+# FUNÇÕES BÁSICAS
 # =========================
-app = Flask(__name__)
-historico = []
-
-@app.route("/")
-def home():
-    return "OURO-TENDÊNCIA v1.2 – Coleta + ALERTA DE FUNDO ATIVOS", 200
-
-@app.route("/health")
-def health():
-    return "OK", 200
-
-
-# =========================
-# FERRAMENTAS
-# =========================
-def br_time():
+def now():
     return datetime.now().strftime("%H:%M:%S")
 
+async def send(msg):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(url, json={"chat_id": CHAT_ID, "text": msg})
+    except:
+        pass
 
-async def get_json(session, url, params=None, timeout=15):
-    for _ in range(2):
-        try:
-            async with session.get(url, params=params, timeout=timeout) as r:
-                return await r.json()
-        except Exception:
-            await asyncio.sleep(0.4)
-    return None
-
+async def get_json(session, url, params=None):
+    try:
+        async with session.get(url, params=params, timeout=10) as r:
+            return await r.json()
+    except:
+        return None
 
 async def fetch_24hr(session):
     return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
-
 
 async def fetch_klines(session, sym, interval="5m", limit=120):
     return await get_json(
         session,
         f"{BINANCE}/api/v3/klines",
-        {"symbol": sym, "interval": interval, "limit": limit},
+        {"symbol": sym, "interval": interval, "limit": limit}
     )
 
-
+# =========================
+# INDICADORES
+# =========================
 def ema(values, period):
-    if not values:
-        return 0.0
     k = 2 / (period + 1)
     e = values[0]
     for v in values[1:]:
         e = v * k + e * (1 - k)
     return e
 
-
-def macd(values, fast=12, slow=26, signal=9):
-    if len(values) < slow + signal:
-        return 0.0, 0.0
-    window = values[-(slow + signal):]
-    ema_fast = ema(window, fast)
-    ema_slow = ema(window, slow)
-    macd_line = ema_fast - ema_slow
-    sig = ema([macd_line] * signal, signal)
-    return macd_line, macd_line - sig
-
+def macd(values):
+    if len(values) < 35:
+        return 0, 0
+    fast = ema(values[-26:], 12)
+    slow = ema(values[-35:], 26)
+    line = fast - slow
+    signal = ema([line]*9, 9)
+    hist = line - signal
+    return line, hist
 
 def rsi(values, period=14):
     if len(values) < period + 1:
-        return 50.0
-    gains = [max(values[i] - values[i - 1], 0.0) for i in range(1, len(values))]
-    losses = [max(values[i - 1] - values[i], 0.0) for i in range(1, len(values))]
+        return 50
+    gains = [max(values[i] - values[i-1], 0) for i in range(1, len(values))]
+    losses = [max(values[i-1] - values[i], 0) for i in range(1, len(values))]
     ag = sum(gains[-period:]) / period
     al = sum(losses[-period:]) / period or 1e-9
-    return 100.0 - (100.0 / (1.0 + ag / al))
-
+    return 100 - (100 / (1 + ag/al))
 
 # =========================
 # ALERTA DE FUNDO
@@ -98,110 +82,102 @@ _last_alert = {}
 
 async def alerta_fundo(session, sym, closes):
     if len(closes) < 40:
+        print(f"[{now()}] Ignorado {sym}: dados insuficientes")
         return
 
-    ema9_now = ema(closes[-20:], 9)
-    ema20_now = ema(closes[-20:], 20)
+    ema200 = ema(closes[-200:], 200) if len(closes) >= 200 else closes[-1] + 999
 
+    # só alerta se estiver abaixo da 200
+    if closes[-1] > ema200:
+        return
+
+    ema9 = ema(closes[-20:], 9)
+    ema20 = ema(closes[-20:], 20)
     rsi_now = rsi(closes)
     macd_line, hist = macd(closes)
 
-    # Condições
     queda_forte = closes[-1] < closes[-6] * 0.985
     estabilizou = abs(closes[-1] - closes[-2]) <= closes[-1] * 0.003
-    virada = ema9_now > ema20_now or (macd_line > 0 and hist > 0)
+    virada = ema9 > ema20 or (macd_line > 0 and hist > 0)
 
     if queda_forte and estabilizou and virada:
-
-        now = time.time()
+        nowt = time.time()
         last = _last_alert.get(sym, 0)
+        if nowt - last < 900:
+            return
+        _last_alert[sym] = nowt
 
-        if now - last > 900:
-            _last_alert[sym] = now
-
-            print(f"[{br_time()}] 🔔 ALERTA FUNDO: {sym}")
-
-            msg = (
-                f"🔔 POSSÍVEL FUNDO DETECTADO\n\n"
-                f"{sym}\n"
-                f"Preço: {closes[-1]:.6f}\n"
-                f"RSI: {rsi_now:.1f}\n"
-                f"MACD virando\n"
-                f"EMA9 possivelmente cruzando\n\n"
-                f"Queda forte + estabilização + início de reversão."
-            )
-
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            try:
-                await session.post(url, json={"chat_id": CHAT_ID, "text": msg})
-            except:
-                pass
-
+        msg = (
+            f"🔔 POSSÍVEL FUNDO DETECTADO\n\n"
+            f"{sym}\n"
+            f"Preço: {closes[-1]:.6f}\n"
+            f"RSI: {rsi_now:.1f}\n"
+            f"MACD virando | EMA9 x EMA20\n"
+            f"Abaixo da M200\n"
+            f"Queda forte + estabilização + reversão."
+        )
+        await send(msg)
+        print(f"[{now()}] ALERTA ENVIADO: {sym}")
 
 # =========================
 # LOOP PRINCIPAL
 # =========================
 async def monitor_loop():
-    print("🚀 OURO-TENDÊNCIA + FUNDO ativo")
+    await send("🟢 OURO-SENTINELA INICIADO")
+
+    print("====================================")
+    print(" OURO-SENTINELA RODANDO NO RENDER...")
+    print("====================================")
 
     while True:
         try:
             async with aiohttp.ClientSession() as s:
 
-                print(f"[{br_time()}] Iniciando varredura...")
-
-                all24 = await fetch_24hr(s)
-                if not all24 or isinstance(all24, dict):
-                    print(f"[{br_time()}] Erro ao acessar 24hr")
+                data24 = await fetch_24hr(s)
+                if not data24 or isinstance(data24, dict):
+                    print(f"[{now()}] Erro ao puxar 24hr")
                     await asyncio.sleep(5)
                     continue
 
                 allow = set(PAIRS.split(",")) if PAIRS else None
                 pool = []
 
-                for x in all24:
+                for x in data24:
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
-                    if sym and vol and sym.endswith("USDT"):
-                        try:
-                            if float(vol) >= MIN_QV_USDT:
-                                if not allow or sym in allow:
-                                    pool.append((sym, float(vol)))
-                        except:
-                            pass
+
+                    if not sym or not vol:
+                        continue
+                    if not sym.endswith("USDT"):
+                        continue
+                    if allow and sym not in allow:
+                        continue
+                    try:
+                        if float(vol) >= MIN_QV_USDT:
+                            pool.append((sym, float(vol)))
+                    except:
+                        pass
 
                 symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
 
-                print(f"[{br_time()}] Monitorando {len(symbols)} pares: {', '.join(symbols)}")
+                print(f"[{now()}] Monitorando {len(symbols)} pares...")
 
                 for sym in symbols:
-                    print(f"[{br_time()}] Analisando {sym}")
-
-                    kl = await fetch_klines(s, sym, "5m", 120)
+                    kl = await fetch_klines(s, sym, "5m", 200)
                     if not kl:
                         continue
 
                     closes = [float(k[4]) for k in kl]
-
                     await alerta_fundo(s, sym, closes)
 
-                print(f"[{br_time()}] Varredura concluída.\n")
                 await asyncio.sleep(SCAN_INTERVAL)
 
         except Exception as e:
-            print(f"[{br_time()}] LOOP ERRO: {e}")
+            print(f"[{now()}] LOOP ERRO: {e}")
             await asyncio.sleep(5)
 
-
-def start_background():
-    def runner():
-        asyncio.run(monitor_loop())
-    t = threading.Thread(target=runner, daemon=True)
-    t.start()
-    return t
-
-
-start_background()
-
+# =========================
+# RODAR DIRETO
+# =========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    asyncio.run(monitor_loop())
