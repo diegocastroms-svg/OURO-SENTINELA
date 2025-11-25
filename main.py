@@ -173,7 +173,7 @@ async def alerta_fundo(session, sym, opens, closes):
             if drop_pct < 0.03:  # precisa ter caído pelo menos ~3% antes de lateralizar
                 return
 
-    # filtros leves de momento (opcional, mas ajuda)
+    # filtros leves de momento
     rsi_now = rsi(closes)
     macd_line, hist = macd(closes)
 
