@@ -11,7 +11,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 # ============================================
 # BOTÕES LIGAR/DESLIGAR ALERTAS
 # ============================================
-ALERTA_UP = True        # True = ligado / False = desligado
+ALERTA_UP = False        # True = ligado / False = desligado
 ALERTA_DOWN = False     # True = ligado / False = desligado (DESLIGADO por padrão)
 
 
