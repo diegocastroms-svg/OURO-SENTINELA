@@ -6,20 +6,30 @@ from flask import Flask
 # CONFIG
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = 200  # monitora praticamente tudo
-SCAN_INTERVAL = 60
-MIN_QV_USDT = 2_000_000  # volume mínimo 2 milhões
+TOP_N = int(os.getenv("TOP_N", "30"))  # hoje não usamos para cortar, mas deixei
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
+MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "2000000"))  # 2 milhões
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
+PAIRS = os.getenv("PAIRS", "").strip()
 
-MOEDAS_MORTAS = [
-    "USDC", "USDT", "FDUSD", "TUSD", "BUSD", "EUR", "BRL",
-    "TRY", "GBP", "AUD", "CAD", "RUB", "UAH", "VAI", "DAI",
-]
+# bloquear moedas mortas / fiat / lixo
+BLOQUEIO_BASE = (
+    "EUR", "BRL", "TRY", "GBP", "AUD", "CAD", "CHF", "RUB",
+    "MXN", "ZAR", "BKRW", "BVND", "IDRT",
+    "FDUSD", "BUSD", "TUSD", "USDC", "USDP", "USDE",
+    "PAXG"
+)
+
+PADROES_LIXO = (
+    "USD1", "FUSD",
+    "HEDGE", "BEAR", "BULL", "DOWN", "UP",
+    "WLF", "OLD"
+)
 
 # =========================
-# FLASK
+# FLASK (Render exige)
 # =========================
 app = Flask(__name__)
 
@@ -33,10 +43,11 @@ def health():
 
 
 # =========================
-# FUNÇÕES
+# FUNÇÕES BÁSICAS
 # =========================
 def now():
     return datetime.now().strftime("%H:%M:%S")
+
 
 async def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -48,6 +59,7 @@ async def send(msg):
     except:
         pass
 
+
 async def get_json(session, url, params=None):
     try:
         async with session.get(url, params=params, timeout=10) as r:
@@ -55,8 +67,10 @@ async def get_json(session, url, params=None):
     except:
         return None
 
+
 async def fetch_24hr(session):
     return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
+
 
 async def fetch_klines(session, sym, interval="5m", limit=200):
     return await get_json(
@@ -69,60 +83,115 @@ async def fetch_klines(session, sym, interval="5m", limit=200):
 # =========================
 # INDICADORES
 # =========================
-def ma(values, period):
-    if len(values) < period:
-        return values[-1] + 999999
-    return sum(values[-period:]) / period
+def ema(values, period):
+    if not values:
+        return 0.0
+    k = 2 / (period + 1)
+    e = values[0]
+    for v in values[1:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def macd(values):
+    if len(values) < 35:
+        return 0.0, 0.0
+    fast = ema(values[-26:], 12)
+    slow = ema(values[-35:], 26)
+    line = fast - slow
+    signal = ema([line] * 9, 9)
+    hist = line - signal
+    return line, hist
+
+
+def rsi(values, period=14):
+    if len(values) < period + 1:
+        return 50.0
+    gains = [max(values[i] - values[i - 1], 0.0) for i in range(1, len(values))]
+    losses = [max(values[i - 1] - values[i], 0.0) for i in range(1, len(values))]
+    ag = sum(gains[-period:]) / period
+    al = sum(losses[-period:]) / period or 1e-9
+    return 100.0 - (100.0 / (1.0 + ag / al))
 
 
 # =========================
-# ALERTA DE FUNDO — VELAS PEQUENAS + CANDLE FORTE 2×
+# ALERTA DE FUNDO
 # =========================
 _last_alert = {}
 
-async def alerta_fundo(session, sym, closes):
-
-    if len(closes) < 210:
+async def alerta_fundo(session, sym, opens, closes):
+    n = len(closes)
+    if n < 60:
+        print(f"[{now()}] Ignorado {sym}: poucos dados")
         return
 
-    # MA200
-    ma200 = ma(closes, 200)
+    # M200 – só quero fundo abaixo dela
+    if n >= 200:
+        ema200 = ema(closes[-200:], 200)
+    else:
+        ema200 = closes[-1] + 999  # força a reprovar se não tiver dados
 
-    # abaixo da 200
-    if closes[-1] > ma200:
+    if closes[-1] > ema200:
         return
 
-    # === 2) compressão ===
-    corpos = [abs(closes[i] - closes[i-1]) for i in range(-6, -1)]
-    if not all(c < closes[-1] * 0.004 for c in corpos):
+    # cluster de velas pequenas (lateralização)
+    cluster_len = 6
+    cluster_opens = opens[-(cluster_len + 1):-1]
+    cluster_closes = closes[-(cluster_len + 1):-1]
+
+    cluster_bodies = [abs(c - o) for o, c in zip(cluster_opens, cluster_closes)]
+    if not cluster_bodies:
         return
 
-    media_corpos = sum(corpos) / len(corpos)
+    avg_body = sum(cluster_bodies) / len(cluster_bodies)
+    cluster_mid = sum(cluster_closes) / len(cluster_closes)
+    cluster_range = max(cluster_closes) - min(cluster_closes)
 
-    # === 3) candle forte 2× ===
-    corpo_atual = abs(closes[-1] - closes[-2])
-    if corpo_atual < media_corpos * 2:
+    # precisa estar bem de lado (range pequeno)
+    if cluster_range > cluster_mid * 0.007:  # ~0,7%
         return
 
-    # === 4) rompendo pra cima ===
-    if closes[-1] <= closes[-2]:
+    # candle atual forte e verde
+    big_open = opens[-1]
+    big_close = closes[-1]
+    big_body = abs(big_close - big_open)
+
+    if big_close <= big_open:
+        return  # não é candle de força pra cima
+
+    if big_body < avg_body * 2.0:  # 2x a média das velas pequenas
         return
 
-    # === cooldown ===
-    ts = time.time()
-    if ts - _last_alert.get(sym, 0) < 900:
+    # garante que teve queda antes da consolidação (fundo de poço)
+    window_drop = 20 + cluster_len
+    pre_region = closes[: -(cluster_len + 1)]  # tudo antes do bloco lateral
+
+    if len(pre_region) >= 5:
+        max_pre = max(pre_region[-window_drop:]) if len(pre_region) > window_drop else max(pre_region)
+        if max_pre > 0:
+            drop_pct = (max_pre - cluster_mid) / max_pre
+            if drop_pct < 0.03:  # precisa ter caído pelo menos ~3% antes de lateralizar
+                return
+
+    # filtros leves de momento (opcional, mas ajuda)
+    rsi_now = rsi(closes)
+    macd_line, hist = macd(closes)
+
+    nowt = time.time()
+    last = _last_alert.get(sym, 0.0)
+    if nowt - last < 900:  # cooldown 15 min por par
         return
 
-    _last_alert[sym] = ts
+    _last_alert[sym] = nowt
 
     msg = (
-        f"🔔 FUNDO DETECTADO\n\n"
+        f"🔔 POSSÍVEL FUNDO DE POÇO\n\n"
         f"{sym}\n"
         f"Preço: {closes[-1]:.6f}\n"
-        f"Abaixo da MA200\n"
-        f"Compressão (velas pequenas)\n"
-        f"Candle forte 2× maior\n"
-        f"Rompimento pra cima\n"
+        f"RSI: {rsi_now:.1f}\n"
+        f"MACD: {macd_line:.6f} | Hist: {hist:.6f}\n"
+        f"Abaixo da M200\n"
+        f"Lateralização de velas pequenas + candle forte 2x saindo do fundo."
     )
     await send(msg)
     print(f"[{now()}] ALERTA ENVIADO: {sym}")
@@ -133,43 +202,47 @@ async def alerta_fundo(session, sym, closes):
 # =========================
 async def monitor_loop():
     await send("🟢 OURO-SENTINELA INICIADO")
-
     print("OURO-SENTINELA RODANDO...")
 
     while True:
         try:
             async with aiohttp.ClientSession() as s:
-                data24 = await fetch_24hr(s)
 
-                if not data24:
+                data24 = await fetch_24hr(s)
+                if not data24 or isinstance(data24, dict):
                     print(f"[{now()}] Erro ao puxar 24h")
                     await asyncio.sleep(5)
                     continue
 
-                pool = []
+                allow = set(PAIRS.split(",")) if PAIRS else None
 
+                pool = []
                 for x in data24:
+                    if not isinstance(x, dict):
+                        continue
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
-
                     if not sym or not vol:
                         continue
-
-                    # spot usdt only
                     if not sym.endswith("USDT"):
                         continue
 
-                    # bloqueio automático de moedas mortas
-                    if any(sym.startswith(m) for m in MOEDAS_MORTAS):
+                    base = sym.replace("USDT", "")
+                    if base in BLOQUEIO_BASE:
+                        continue
+                    if any(p in base for p in PADROES_LIXO):
                         continue
 
+                    if allow and sym not in allow:
+                        continue
                     try:
                         if float(vol) >= MIN_QV_USDT:
                             pool.append((sym, float(vol)))
                     except:
                         pass
 
-                symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
+                # todas as spot filtradas por volume, ordenadas por volume
+                symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)]
 
                 print(f"[{now()}] Monitorando {len(symbols)} pares...")
 
@@ -178,9 +251,10 @@ async def monitor_loop():
                     if not kl:
                         continue
 
+                    opens = [float(k[1]) for k in kl]
                     closes = [float(k[4]) for k in kl]
 
-                    await alerta_fundo(s, sym, closes)
+                    await alerta_fundo(s, sym, opens, closes)
 
                 await asyncio.sleep(SCAN_INTERVAL)
 
@@ -190,7 +264,7 @@ async def monitor_loop():
 
 
 # =========================
-# THREAD + FLASK
+# THREAD PARA RODAR O BOT
 # =========================
 def start_bot():
     asyncio.run(monitor_loop())
@@ -198,5 +272,10 @@ def start_bot():
 t = threading.Thread(target=start_bot, daemon=True)
 t.start()
 
+
+# =========================
+# FLASK RODANDO PARA O RENDER ACEITAR
+# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+```0
