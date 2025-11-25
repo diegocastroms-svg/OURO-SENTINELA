@@ -25,6 +25,13 @@ BLOQUEIO_BASE = (
     "FDUSD", "BUSD", "TUSD", "USDC", "USDP", "USDE", "PAXG"
 )
 
+# padrões de nomes de tokens lixo / sintéticos / alavancados
+PADROES_LIXO = (
+    "USD1", "FUSD", "BFUSD",
+    "HEDGE", "BEAR", "BULL", "DOWN", "UP",
+    "WLF", "OLD"
+)
+
 
 async def carregar_pairs_validos():
     async with aiohttp.ClientSession() as s:
@@ -42,8 +49,14 @@ async def carregar_pairs_validos():
             if sym["quoteAsset"] != "USDT":
                 continue
 
-            # bloquear fiat / stablecoins fracas / tokens lixo
-            if sym["baseAsset"] in BLOQUEIO_BASE:
+            base = sym["baseAsset"]
+
+            # bloquear fiat / stablecoins fracas / tokens lixo fixos
+            if base in BLOQUEIO_BASE:
+                continue
+
+            # bloquear por padrão de nome (tokens mortos/sintéticos/alavancados)
+            if any(p in base for p in PADROES_LIXO):
                 continue
 
             ativos.append(sym["symbol"])
@@ -203,16 +216,15 @@ async def monitorar_heatmap():
                     side, dom = dec["side"], dec["dominance"]
 
                     # =====================================================
-                    # BOTÕES ON/OFF dos alertas
+                    # BOTÕES ON/OFF dos alertas (ALTA / BAIXA)
                     # =====================================================
-                    if side == "UP" and ALERTA_UP:
-                        ativo_alerta = True
-                    elif side == "DOWN" and ALERTA_DOWN:
-                        ativo_alerta = True
+                    if side == "UP":
+                        if not ALERTA_UP:
+                            continue
+                    elif side == "DOWN":
+                        if not ALERTA_DOWN:
+                            continue
                     else:
-                        ativo_alerta = False
-
-                    if not ativo_alerta:
                         continue
 
                     if dom < 0.55:
