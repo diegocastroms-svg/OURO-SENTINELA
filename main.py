@@ -6,9 +6,9 @@ from flask import Flask
 # CONFIG
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "30"))  # hoje não usamos para cortar, mas deixei
+TOP_N = int(os.getenv("TOP_N", "30"))
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
-MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "2000000"))  # 2 milhões
+MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "2000000"))
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -41,13 +41,11 @@ def home():
 def health():
     return "OK", 200
 
-
 # =========================
 # FUNÇÕES BÁSICAS
 # =========================
 def now():
     return datetime.now().strftime("%H:%M:%S")
-
 
 async def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -59,7 +57,6 @@ async def send(msg):
     except:
         pass
 
-
 async def get_json(session, url, params=None):
     try:
         async with session.get(url, params=params, timeout=10) as r:
@@ -67,10 +64,8 @@ async def get_json(session, url, params=None):
     except:
         return None
 
-
 async def fetch_24hr(session):
     return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
-
 
 async def fetch_klines(session, sym, interval="5m", limit=200):
     return await get_json(
@@ -78,7 +73,6 @@ async def fetch_klines(session, sym, interval="5m", limit=200):
         f"{BINANCE}/api/v3/klines",
         {"symbol": sym, "interval": interval, "limit": limit}
     )
-
 
 # =========================
 # INDICADORES
@@ -92,7 +86,6 @@ def ema(values, period):
         e = v * k + e * (1 - k)
     return e
 
-
 def macd(values):
     if len(values) < 35:
         return 0.0, 0.0
@@ -103,7 +96,6 @@ def macd(values):
     hist = line - signal
     return line, hist
 
-
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50.0
@@ -112,7 +104,6 @@ def rsi(values, period=14):
     ag = sum(gains[-period:]) / period
     al = sum(losses[-period:]) / period or 1e-9
     return 100.0 - (100.0 / (1.0 + ag / al))
-
 
 # =========================
 # ALERTA DE FUNDO
@@ -125,16 +116,14 @@ async def alerta_fundo(session, sym, opens, closes):
         print(f"[{now()}] Ignorado {sym}: poucos dados")
         return
 
-    # M200 – só quero fundo abaixo dela
     if n >= 200:
         ema200 = ema(closes[-200:], 200)
     else:
-        ema200 = closes[-1] + 999  # força a reprovar se não tiver dados
+        ema200 = closes[-1] + 999
 
     if closes[-1] > ema200:
         return
 
-    # cluster de velas pequenas (lateralização)
     cluster_len = 6
     cluster_opens = opens[-(cluster_len + 1):-1]
     cluster_closes = closes[-(cluster_len + 1):-1]
@@ -147,55 +136,54 @@ async def alerta_fundo(session, sym, opens, closes):
     cluster_mid = sum(cluster_closes) / len(cluster_closes)
     cluster_range = max(cluster_closes) - min(cluster_closes)
 
-    # precisa estar bem de lado (range pequeno)
-    if cluster_range > cluster_mid * 0.007:  # ~0,7%
+    if cluster_range > cluster_mid * 0.007:
         return
 
-    # candle atual forte e verde
     big_open = opens[-1]
     big_close = closes[-1]
     big_body = abs(big_close - big_open)
 
     if big_close <= big_open:
-        return  # não é candle de força pra cima
-
-    if big_body < avg_body * 2.0:  # 2x a média das velas pequenas
         return
 
-    # garante que teve queda antes da consolidação (fundo de poço)
+    if big_body < avg_body * 2.0:
+        return
+
     window_drop = 20 + cluster_len
-    pre_region = closes[: -(cluster_len + 1)]  # tudo antes do bloco lateral
+    pre_region = closes[:-(cluster_len + 1)]
 
     if len(pre_region) >= 5:
-        max_pre = max(pre_region[-window_drop:]) if len(pre_region) > window_drop else max(pre_region)
+        if len(pre_region) > window_drop:
+            max_pre = max(pre_region[-window_drop:])
+        else:
+            max_pre = max(pre_region)
+
         if max_pre > 0:
             drop_pct = (max_pre - cluster_mid) / max_pre
-            if drop_pct < 0.03:  # precisa ter caído pelo menos ~3% antes de lateralizar
+            if drop_pct < 0.03:
                 return
 
-    # filtros leves de momento
     rsi_now = rsi(closes)
     macd_line, hist = macd(closes)
 
     nowt = time.time()
     last = _last_alert.get(sym, 0.0)
-    if nowt - last < 900:  # cooldown 15 min por par
+    if nowt - last < 900:
         return
 
     _last_alert[sym] = nowt
 
     msg = (
-        f"🔔 POSSÍVEL FUNDO DE POÇO\n\n"
+        "🔔 POSSÍVEL FUNDO DE POÇO\n\n"
         f"{sym}\n"
         f"Preço: {closes[-1]:.6f}\n"
         f"RSI: {rsi_now:.1f}\n"
         f"MACD: {macd_line:.6f} | Hist: {hist:.6f}\n"
-        f"Abaixo da M200\n"
-        f"Lateralização de velas pequenas + candle forte 2x saindo do fundo."
+        "Abaixo da M200\n"
+        "Lateralização de velas pequenas + candle forte 2x saindo do fundo."
     )
     await send(msg)
     print(f"[{now()}] ALERTA ENVIADO: {sym}")
-
 
 # =========================
 # LOOP PRINCIPAL
@@ -235,13 +223,13 @@ async def monitor_loop():
 
                     if allow and sym not in allow:
                         continue
+
                     try:
                         if float(vol) >= MIN_QV_USDT:
                             pool.append((sym, float(vol)))
                     except:
                         pass
 
-                # todas as spot filtradas por volume, ordenadas por volume
                 symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)]
 
                 print(f"[{now()}] Monitorando {len(symbols)} pares...")
@@ -262,7 +250,6 @@ async def monitor_loop():
             print(f"[{now()}] LOOP ERRO: {e}")
             await asyncio.sleep(5)
 
-
 # =========================
 # THREAD PARA RODAR O BOT
 # =========================
@@ -272,10 +259,8 @@ def start_bot():
 t = threading.Thread(target=start_bot, daemon=True)
 t.start()
 
-
 # =========================
 # FLASK RODANDO PARA O RENDER ACEITAR
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-```0
