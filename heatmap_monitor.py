@@ -10,7 +10,15 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 # ============================================
 # ACEITAR SOMENTE PARES SPOT USDT
+# E BLOQUEAR FIAT / STABLES FRACAS / TOKENS LIXO
 # ============================================
+BLOQUEIO_BASE = (
+    "EUR", "BRL", "TRY", "GBP", "AUD", "CAD", "CHF", "RUB",
+    "MXN", "ZAR", "BKRW", "BVND", "IDRT",
+    "FDUSD", "BUSD", "TUSD", "USDC", "USDP", "USDE", "PAXG"
+)
+
+
 async def carregar_pairs_validos():
     async with aiohttp.ClientSession() as s:
         url = f"{BINANCE}/api/v3/exchangeInfo"
@@ -23,8 +31,12 @@ async def carregar_pairs_validos():
             if sym["status"] != "TRADING":
                 continue
 
-            # ACEITAR SOMENTE QUOTE USDT
+            # aceitar somente USDT
             if sym["quoteAsset"] != "USDT":
+                continue
+
+            # bloquear fiat / stablecoins fracas / tokens lixo
+            if sym["baseAsset"] in BLOQUEIO_BASE:
                 continue
 
             ativos.append(sym["symbol"])
@@ -134,7 +146,7 @@ def decidir_direcao(info):
         return {"side": "UP", "dominance": dom}
 
     if down_n > up_n * HEATMAP_MIN_DOMINANCE_RATIO:
-        dom = down_n / (up_n + down_n)
+        dom = down_n / (down_n + up_n)
         return {"side": "DOWN", "dominance": dom}
 
     return {"side": "FLAT", "dominance": 0.0}
