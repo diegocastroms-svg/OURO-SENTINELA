@@ -14,19 +14,44 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
 
-# bloquear moedas mortas / fiat / lixo
-BLOQUEIO_BASE = (
-    "EUR", "BRL", "TRY", "GBP", "AUD", "CAD", "CHF", "RUB",
-    "MXN", "ZAR", "BKRW", "BVND", "IDRT",
-    "FDUSD", "BUSD", "TUSD", "USDC", "USDP", "USDE",
-    "PAXG"
-)
+# =========================
+# FILTRO DEFINITIVO — SPOT REAL APENAS
+# =========================
+def par_eh_valido(sym):
+    base = sym.replace("USDT", "").upper()
 
-PADROES_LIXO = (
-    "USD1", "FUSD",
-    "HEDGE", "BEAR", "BULL", "DOWN", "UP",
-    "WLF", "OLD"
-)
+    # bloquear alavancadas
+    if sym.endswith("UPUSDT"): return False
+    if sym.endswith("DOWNUSDT"): return False
+    if sym.endswith("BULLUSDT"): return False
+    if sym.endswith("BEARUSDT"): return False
+
+    # bloquear sintéticos / wrapped
+    if base.startswith(("W", "M", "X")):
+        return False
+
+    # tokens marcadamente lixo / meme / engodo
+    lixo_contains = (
+        "INU", "PEPE", "FLOKI", "BABY", "CAT", "DOGE2",
+        "SHIB2", "MOON", "MEME", "AI", "OLD", "NEW",
+        "GEN", "PUP", "PUPPY", "TURBO", "WIF", "2", "3"
+    )
+    for k in lixo_contains:
+        if k in base:
+            return False
+
+    # fiat / stablecoins podres
+    bloquear = (
+        "EUR","BRL","TRY","GBP","AUD","CAD","CHF","RUB",
+        "MXN","ZAR","BKRW","BVND","IDRT",
+        "FDUSD","BUSD","TUSD","USDC","USDP","USDE",
+        "PAXG"
+    )
+    if base in bloquear:
+        return False
+
+    return True
+
 
 # =========================
 # FLASK (Render exige)
@@ -40,6 +65,7 @@ def home():
 @app.route("/health")
 def health():
     return "OK", 200
+
 
 # =========================
 # FUNÇÕES BÁSICAS
@@ -74,6 +100,7 @@ async def fetch_klines(session, sym, interval="5m", limit=200):
         {"symbol": sym, "interval": interval, "limit": limit}
     )
 
+
 # =========================
 # INDICADORES
 # =========================
@@ -105,6 +132,7 @@ def rsi(values, period=14):
     al = sum(losses[-period:]) / period or 1e-9
     return 100.0 - (100.0 / (1.0 + ag / al))
 
+
 # =========================
 # ALERTA DE FUNDO
 # =========================
@@ -113,9 +141,9 @@ _last_alert = {}
 async def alerta_fundo(session, sym, opens, closes):
     n = len(closes)
     if n < 60:
-        print(f"[{now()}] Ignorado {sym}: poucos dados")
         return
 
+    # M200
     if n >= 200:
         ema200 = ema(closes[-200:], 200)
     else:
@@ -124,6 +152,7 @@ async def alerta_fundo(session, sym, opens, closes):
     if closes[-1] > ema200:
         return
 
+    # Lateral
     cluster_len = 6
     cluster_opens = opens[-(cluster_len + 1):-1]
     cluster_closes = closes[-(cluster_len + 1):-1]
@@ -133,12 +162,8 @@ async def alerta_fundo(session, sym, opens, closes):
         return
 
     avg_body = sum(cluster_bodies) / len(cluster_bodies)
-    cluster_mid = sum(cluster_closes) / len(cluster_closes)
-    cluster_range = max(cluster_closes) - min(cluster_closes)
 
-    if cluster_range > cluster_mid * 0.007:
-        return
-
+    # Vela >= 2× maior
     big_open = opens[-1]
     big_close = closes[-1]
     big_body = abs(big_close - big_open)
@@ -146,44 +171,32 @@ async def alerta_fundo(session, sym, opens, closes):
     if big_close <= big_open:
         return
 
-    if big_body < avg_body * 2.0:
+    if big_body < avg_body * 2:
         return
 
-    window_drop = 20 + cluster_len
+    # Queda antes (sem % fixa)
     pre_region = closes[:-(cluster_len + 1)]
-
-    if len(pre_region) >= 5:
-        if len(pre_region) > window_drop:
-            max_pre = max(pre_region[-window_drop:])
-        else:
-            max_pre = max(pre_region)
-
-        if max_pre > 0:
-            drop_pct = (max_pre - cluster_mid) / max_pre
-            if drop_pct < 0.03:
-                return
-
-    rsi_now = rsi(closes)
-    macd_line, hist = macd(closes)
-
-    nowt = time.time()
-    last = _last_alert.get(sym, 0.0)
-    if nowt - last < 900:
+    if len(pre_region) < 5:
         return
 
+    if max(pre_region[-20:]) <= max(cluster_closes):
+        return
+
+    # Cooldown
+    nowt = time.time()
+    if nowt - _last_alert.get(sym, 0) < 900:
+        return
     _last_alert[sym] = nowt
 
     msg = (
         "🔔 POSSÍVEL FUNDO DE POÇO\n\n"
         f"{sym}\n"
         f"Preço: {closes[-1]:.6f}\n"
-        f"RSI: {rsi_now:.1f}\n"
-        f"MACD: {macd_line:.6f} | Hist: {hist:.6f}\n"
-        "Abaixo da M200\n"
-        "Lateralização de velas pequenas + candle forte 2x saindo do fundo."
+        "Queda antes + lateralização + vela de rompimento >= 2×."
     )
     await send(msg)
     print(f"[{now()}] ALERTA ENVIADO: {sym}")
+
 
 # =========================
 # LOOP PRINCIPAL
@@ -208,6 +221,7 @@ async def monitor_loop():
                 for x in data24:
                     if not isinstance(x, dict):
                         continue
+
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
                     if not sym or not vol:
@@ -215,10 +229,7 @@ async def monitor_loop():
                     if not sym.endswith("USDT"):
                         continue
 
-                    base = sym.replace("USDT", "")
-                    if base in BLOQUEIO_BASE:
-                        continue
-                    if any(p in base for p in PADROES_LIXO):
+                    if not par_eh_valido(sym):
                         continue
 
                     if allow and sym not in allow:
@@ -250,6 +261,7 @@ async def monitor_loop():
             print(f"[{now()}] LOOP ERRO: {e}")
             await asyncio.sleep(5)
 
+
 # =========================
 # THREAD PARA RODAR O BOT
 # =========================
@@ -258,6 +270,7 @@ def start_bot():
 
 t = threading.Thread(target=start_bot, daemon=True)
 t.start()
+
 
 # =========================
 # FLASK RODANDO PARA O RENDER ACEITAR
