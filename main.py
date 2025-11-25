@@ -106,14 +106,14 @@ async def alerta_fundo(session, sym, closes):
     rsi_now = rsi(closes)
     macd_line, hist = macd(closes)
 
-    queda_forte = closes[-1] < closes[-6] * 0.985     # queda ~1.5% em poucas velas
+    queda_forte = closes[-1] < closes[-6] * 0.985     # queda ~1.5%
     estabilizou = abs(closes[-1] - closes[-2]) <= closes[-1] * 0.003
     virada = ema9_now > ema20_now or (macd_line > 0 and hist > 0)
 
     if queda_forte and estabilizou and virada:
         now = time.time()
         last = _last_alert.get(sym, 0)
-        if now - last > 900:
+        if now - last > 900:  # cooldown 15 min
             _last_alert[sym] = now
 
             msg = (
