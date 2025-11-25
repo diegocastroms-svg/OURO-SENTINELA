@@ -6,9 +6,9 @@ from flask import Flask
 # CONFIG
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "30"))
+TOP_N = int(os.getenv("TOP_N", "50"))
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
-MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "2000000"))
+MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "500000"))
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
