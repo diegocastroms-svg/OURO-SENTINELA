@@ -92,26 +92,12 @@ def rsi(values, period=14):
 
 
 # =========================
-# ALERTA DE FUNDO SIMPLES (COM SMA200)
+# ALERTA DE FUNDO
 # =========================
 _last_alert = {}
 
-def sma(values, period):
-    if len(values) < period:
-        return sum(values) / len(values)
-    return sum(values[-period:]) / period
-
-
 async def alerta_fundo(session, sym, closes):
-    if len(closes) < 200:
-        return
-
-    # --- M200
-    m200 = sma(closes, 200)
-
-    # === REGRA PRINCIPAL ===
-    # Só alerta se o preço estiver ABAIXO da M200 (zona de fundo real)
-    if closes[-1] > m200:
+    if len(closes) < 40:
         return
 
     ema9_now = ema(closes[-20:], 9)
@@ -120,16 +106,20 @@ async def alerta_fundo(session, sym, closes):
     rsi_now = rsi(closes)
     macd_line, hist = macd(closes)
 
-    queda_forte = closes[-1] < closes[-6] * 0.985    # queda ~1.5%
+    # Condições
+    queda_forte = closes[-1] < closes[-6] * 0.985
     estabilizou = abs(closes[-1] - closes[-2]) <= closes[-1] * 0.003
     virada = ema9_now > ema20_now or (macd_line > 0 and hist > 0)
 
     if queda_forte and estabilizou and virada:
+
         now = time.time()
         last = _last_alert.get(sym, 0)
 
-        if now - last > 900:  # cooldown 15 min
+        if now - last > 900:
             _last_alert[sym] = now
+
+            print(f"[{br_time()}] 🔔 ALERTA FUNDO: {sym}")
 
             msg = (
                 f"🔔 POSSÍVEL FUNDO DETECTADO\n\n"
@@ -137,8 +127,7 @@ async def alerta_fundo(session, sym, closes):
                 f"Preço: {closes[-1]:.6f}\n"
                 f"RSI: {rsi_now:.1f}\n"
                 f"MACD virando\n"
-                f"EMA9 possivelmente cruzando\n"
-                f"Abaixo da M200 (região de fundo)\n\n"
+                f"EMA9 possivelmente cruzando\n\n"
                 f"Queda forte + estabilização + início de reversão."
             )
 
@@ -150,7 +139,7 @@ async def alerta_fundo(session, sym, closes):
 
 
 # =========================
-# LOOP PRINCIPAL – COLETA + ALERTA FUNDO
+# LOOP PRINCIPAL
 # =========================
 async def monitor_loop():
     print("🚀 OURO-TENDÊNCIA + FUNDO ativo")
@@ -159,8 +148,11 @@ async def monitor_loop():
         try:
             async with aiohttp.ClientSession() as s:
 
+                print(f"[{br_time()}] Iniciando varredura...")
+
                 all24 = await fetch_24hr(s)
                 if not all24 or isinstance(all24, dict):
+                    print(f"[{br_time()}] Erro ao acessar 24hr")
                     await asyncio.sleep(5)
                     continue
 
@@ -168,34 +160,32 @@ async def monitor_loop():
                 pool = []
 
                 for x in all24:
-                    if not isinstance(x, dict):
-                        continue
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
-                    if not sym or not vol:
-                        continue
-                    if not sym.endswith("USDT"):
-                        continue
-                    if allow and sym not in allow:
-                        continue
-                    try:
-                        if float(vol) >= MIN_QV_USDT:
-                            pool.append((sym, float(vol)))
-                    except:
-                        pass
+                    if sym and vol and sym.endswith("USDT"):
+                        try:
+                            if float(vol) >= MIN_QV_USDT:
+                                if not allow or sym in allow:
+                                    pool.append((sym, float(vol)))
+                        except:
+                            pass
 
                 symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
 
+                print(f"[{br_time()}] Monitorando {len(symbols)} pares: {', '.join(symbols)}")
+
                 for sym in symbols:
+                    print(f"[{br_time()}] Analisando {sym}")
+
                     kl = await fetch_klines(s, sym, "5m", 120)
                     if not kl:
                         continue
 
                     closes = [float(k[4]) for k in kl]
 
-                    # dispara alerta fundo
                     await alerta_fundo(s, sym, closes)
 
+                print(f"[{br_time()}] Varredura concluída.\n")
                 await asyncio.sleep(SCAN_INTERVAL)
 
         except Exception as e:
