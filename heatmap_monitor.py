@@ -243,7 +243,7 @@ async def monitorar_heatmap():
                     if side == "UP":
                         msg = (
                             f"🔥 ENTRADA REAL DETECTADA\n\n"
-                            f"**{base}**\n\n"
+                            f"{base}\n\n"
                             f"Preço Médio: {mid:.6f}\n"
                             f"Cluster em: {alvo:.6f}\n"
                             f"Notional: ~{notional:,.0f} USDT\n"
@@ -253,7 +253,7 @@ async def monitorar_heatmap():
                     else:
                         msg = (
                             f"⚠️ SAÍDA REAL DETECTADA\n\n"
-                            f"**{base}**\n\n"
+                            f"{base}\n\n"
                             f"Preço Médio: {mid:.6f}\n"
                             f"Cluster em: {alvo:.6f}\n"
                             f"Notional: ~{notional:,.0f} USDT\n"
