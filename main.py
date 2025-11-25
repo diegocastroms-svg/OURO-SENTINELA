@@ -6,13 +6,20 @@ from flask import Flask
 # CONFIG
 # =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "30"))
+TOP_N = int(os.getenv("TOP_N", "3000"))   # monitora praticamente todas
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
-MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "15000000"))
+MIN_QV_USDT = 2_000_000   # <<<<<<<<<<<< ALTERADO PARA 2 MILHÕES
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
+
+# BLOQUEIO DE FIAT / STABLES FRACAS / MOEDAS MORTAS
+BLOQUEIO = (
+    "USDC","BUSD","FDUSD","USDP","USDE","TUSD",
+    "EUR","BRL","TRY","GBP","AUD","CAD","CHF",
+    "MXN","ZAR","RUB","IDRT","BVND","BKRW"
+)
 
 # =========================
 # FLASK (Render exige)
@@ -150,29 +157,35 @@ async def monitor_loop():
 
                 data24 = await fetch_24hr(s)
                 if not data24 or isinstance(data24, dict):
-                    print(f"[{now()}] Erro ao puxar 24h")
+                    print(f"[{now()}] Erro 24h")
                     await asyncio.sleep(5)
                     continue
 
-                allow = set(PAIRS.split(",")) if PAIRS else None
-
                 pool = []
+
                 for x in data24:
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
+
                     if not sym or not vol:
                         continue
+
+                    # Apenas SPOT USDT
                     if not sym.endswith("USDT"):
                         continue
-                    if allow and sym not in allow:
+
+                    # Bloqueio de moedas mortas / fiat / stable fracas
+                    base = sym.replace("USDT", "")
+                    if base in BLOQUEIO:
                         continue
+
                     try:
                         if float(vol) >= MIN_QV_USDT:
                             pool.append((sym, float(vol)))
                     except:
                         pass
 
-                symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)[:TOP_N]]
+                symbols = [s for s, _ in pool]  # monitora TODAS
 
                 print(f"[{now()}] Monitorando {len(symbols)} pares...")
 
@@ -190,6 +203,7 @@ async def monitor_loop():
             await asyncio.sleep(5)
 
 
+
 # =========================
 # THREAD PARA RODAR O BOT
 # =========================
@@ -201,7 +215,7 @@ t.start()
 
 
 # =========================
-# FLASK RODANDO PARA O RENDER ACEITAR
+# FLASK RODANDO
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
