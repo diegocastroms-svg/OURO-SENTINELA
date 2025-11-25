@@ -72,9 +72,8 @@ HEATMAP_ALERT_COOLDOWN = int(os.getenv("HEATMAP_ALERT_COOLDOWN", "900"))
 
 _last_alert = {}
 
-# ============================================
+
 # CONFIRMAÇÃO DUPLA
-# ============================================
 _confirmacao = {}
 
 
@@ -244,20 +243,20 @@ async def monitorar_heatmap():
                         msg = (
                             f"🔥 ENTRADA REAL DETECTADA\n\n"
                             f"{base}\n\n"
-                            f"Preço Médio: {mid:.6f}\n"
-                            f"Cluster em: {alvo:.6f}\n"
-                            f"Notional: ~{notional:,.0f} USDT\n"
-                            f"Dominância: {dom*100:.1f}%\n\n"
+                            f"Preço Atual: {mid:.6f}\n"
+                            f"Ordem de compra acima do preço atual: {alvo:.6f}\n"
+                            f"Total de compra acima do preço atual: ~{notional:,.0f} USDT\n"
+                            f"Dominância compradora: {dom*100:.1f}%\n\n"
                             f"Fluxo comprador dominante — possível movimento de continuação."
                         )
                     else:
                         msg = (
                             f"⚠️ SAÍDA REAL DETECTADA\n\n"
                             f"{base}\n\n"
-                            f"Preço Médio: {mid:.6f}\n"
-                            f"Cluster em: {alvo:.6f}\n"
-                            f"Notional: ~{notional:,.0f} USDT\n"
-                            f"Dominância: {dom*100:.1f}%\n\n"
+                            f"Preço Atual: {mid:.6f}\n"
+                            f"Ordem de venda abaixo do preço atual: {alvo:.6f}\n"
+                            f"Total de venda abaixo do preço atual: ~{notional:,.0f} USDT\n"
+                            f"Dominância vendedora: {dom*100:.1f}%\n\n"
                             f"Pressão vendedora dominante — risco imediato de queda."
                         )
 
