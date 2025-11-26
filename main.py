@@ -8,13 +8,14 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 4_000_000
-COOLDOWN = 900
+MIN_QV_USDT = 2_000_000
+COOLDOWN = 1800
+TIMEFRAME = "15m"
 
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "SENTINELA-RSI25 ATIVO", 200
+    return "SENTINELA-RSI35 15M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -49,10 +50,9 @@ async def fetch_klines(session, sym, limit=50):
     return await get_json(
         session,
         f"{BINANCE}/api/v3/klines",
-        {"symbol": sym, "interval": "5m", "limit": limit}
+        {"symbol": sym, "interval": TIMEFRAME, "limit": limit}
     )
 
-# ------------------------ FILTRO ULTRA COMPLETO ------------------------
 def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper()
 
@@ -79,7 +79,6 @@ def par_eh_valido(sym):
 
     return True
 
-# ---------------------------- INDICADORES ----------------------------
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50
@@ -93,13 +92,13 @@ _last_alert = {}
 
 async def alerta_rsi(session, sym, closes, highs, lows):
     r = rsi(closes)
-
-    if r >= 25:
+    if r >= 35:
         return
 
     mb = sum(closes[-20:]) / 20
-    up = mb + 2 * (sum((c - mb) ** 2 for c in closes[-20:]) / 20) ** 0.5
-    dn = mb - 2 * (sum((c - mb) ** 2 for c in closes[-20:]) / 20) ** 0.5
+    sd = (sum((c - mb) ** 2 for c in closes[-20:]) / 20) ** 0.5
+    up = mb + 2 * sd
+    dn = mb - 2 * sd
 
     if closes[-1] > dn:
         return
@@ -115,19 +114,19 @@ async def alerta_rsi(session, sym, closes, highs, lows):
     nome = sym.replace("USDT", "")
 
     msg = (
-        f"🔔 RSI < 25\n\n"
+        f"🔔 RSI < 35\n\n"
         f"{nome}\n\n"
         f"Preço: {closes[-1]:.6f}\n"
-        f"Banda inferior + RSI < 25"
+        f"RSI: {r:.2f}\n"
+        f"Banda inferior + RSI < 35"
     )
 
     await send(msg)
     print(f"[{now()}] ALERTA: {sym}")
 
-# ---------------------------- LOOP PRINCIPAL ----------------------------
 async def monitor_loop():
-    await send("🟢 SENTINELA RSI<25 INICIADO")
-    print("SENTINELA-RSI25 RODANDO...")
+    await send("🟢 SENTINELA RSI<35 15M INICIADO")
+    print("SENTINELA-RSI35 15M RODANDO...")
 
     while True:
         try:
