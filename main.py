@@ -15,45 +15,6 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
 
 # =========================
-# FILTRO DEFINITIVO — SPOT REAL APENAS
-# =========================
-def par_eh_valido(sym):
-    base = sym.replace("USDT", "").upper()
-
-    # bloquear alavancadas
-    if sym.endswith("UPUSDT"): return False
-    if sym.endswith("DOWNUSDT"): return False
-    if sym.endswith("BULLUSDT"): return False
-    if sym.endswith("BEARUSDT"): return False
-
-    # bloquear sintéticos / wrapped
-    if base.startswith(("W", "M", "X")):
-        return False
-
-    # tokens marcadamente lixo / meme / engodo
-    lixo_contains = (
-        "INU", "PEPE", "FLOKI", "BABY", "CAT", "DOGE2",
-        "SHIB2", "MOON", "MEME", "AI", "OLD", "NEW",
-        "GEN", "PUP", "PUPPY", "TURBO", "WIF", "2", "3"
-    )
-    for k in lixo_contains:
-        if k in base:
-            return False
-
-    # fiat / stablecoins podres
-    bloquear = (
-        "EUR","BRL","TRY","GBP","AUD","CAD","CHF","RUB",
-        "MXN","ZAR","BKRW","BVND","IDRT",
-        "FDUSD","BUSD","TUSD","USDC","USDP","USDE",
-        "PAXG"
-    )
-    if base in bloquear:
-        return False
-
-    return True
-
-
-# =========================
 # FLASK (Render exige)
 # =========================
 app = Flask(__name__)
@@ -90,15 +51,26 @@ async def get_json(session, url, params=None):
     except:
         return None
 
-async def fetch_24hr(session):
-    return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
 
-async def fetch_klines(session, sym, interval="5m", limit=200):
-    return await get_json(
-        session,
-        f"{BINANCE}/api/v3/klines",
-        {"symbol": sym, "interval": interval, "limit": limit}
-    )
+# =========================
+# BUSCAR LISTA REAL DE PARES SPOT
+# =========================
+async def fetch_spot_pairs():
+    async with aiohttp.ClientSession() as s:
+        data = await get_json(s, f"{BINANCE}/api/v3/exchangeInfo")
+        spot = set()
+
+        if not data or "symbols" not in data:
+            return spot
+
+        for x in data["symbols"]:
+            if (
+                x.get("status") == "TRADING" and
+                x.get("isSpotTradingAllowed") == True
+            ):
+                spot.add(x["symbol"])
+
+        return spot
 
 
 # =========================
@@ -170,19 +142,17 @@ async def alerta_fundo(session, sym, opens, closes):
 
     if big_close <= big_open:
         return
-
     if big_body < avg_body * 2:
         return
 
-    # Queda antes (sem % fixa)
+    # queda antes (sem %. apenas queda visual real)
     pre_region = closes[:-(cluster_len + 1)]
     if len(pre_region) < 5:
         return
-
     if max(pre_region[-20:]) <= max(cluster_closes):
         return
 
-    # Cooldown
+    # cooldown
     nowt = time.time()
     if nowt - _last_alert.get(sym, 0) < 900:
         return
@@ -205,6 +175,10 @@ async def monitor_loop():
     await send("🟢 OURO-SENTINELA INICIADO")
     print("OURO-SENTINELA RODANDO...")
 
+    print(f"[{now()}] Baixando lista REAL de pares spot...")
+    spot_pairs = await fetch_spot_pairs()
+    print(f"[{now()}] Total de pares spot reais: {len(spot_pairs)}")
+
     while True:
         try:
             async with aiohttp.ClientSession() as s:
@@ -224,14 +198,17 @@ async def monitor_loop():
 
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
+
                     if not sym or not vol:
                         continue
                     if not sym.endswith("USDT"):
                         continue
 
-                    if not par_eh_valido(sym):
+                    # FILTRO SUPREMO: só SPOT REAL
+                    if sym not in spot_pairs:
                         continue
 
+                    # filtro por allow
                     if allow and sym not in allow:
                         continue
 
@@ -243,7 +220,12 @@ async def monitor_loop():
 
                 symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)]
 
-                print(f"[{now()}] Monitorando {len(symbols)} pares...")
+                # nova impressão completa no LOG do Render
+                print("\n==============================")
+                print(f"[{now()}] MONITORANDO {len(symbols)} PARES SPOT REAIS:")
+                for s in symbols:
+                    print("-", s)
+                print("==============================\n")
 
                 for sym in symbols:
                     kl = await fetch_klines(s, sym, "5m", 200)
