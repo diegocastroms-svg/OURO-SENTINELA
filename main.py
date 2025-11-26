@@ -8,8 +8,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 2_000_000
-COOLDOWN = 600
+MIN_QV_USDT = 4_000_000
+COOLDOWN = 900
 
 app = Flask(__name__)
 @app.route("/")
