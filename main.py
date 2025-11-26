@@ -6,21 +6,22 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "BOT RSI<25 + BOLLINGER ABRINDO PARA BAIXO", 200
+    return "BOT RSI<25 + BOLLINGER DOWN — ONLINE", 200
 
 @app.route("/health")
 def health():
     return "OK", 200
 
 
+# ======================
+# CONFIGURAÇÕES
+# ======================
 BINANCE = "https://api.binance.com"
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
-
-VOLUME_MIN = 2_000_000        # 2 milhões
-COOLDOWN = 600                # 10 minutos
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+CHAT_ID = os.getenv("CHAT_ID", "")
+VOLUME_MIN = 2_000_000
+COOLDOWN = 600
 PAIR_LIST = "https://api.binance.com/api/v3/ticker/price"
-
 
 cooldown_dict = {}
 
@@ -29,8 +30,12 @@ def now_br():
     return datetime.now(timezone(timedelta(hours=-3))).strftime("%H:%M:%S BR")
 
 
+# ======================
+# TELEGRAM
+# ======================
 async def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("⚠ SEM TOKEN OU CHAT_ID")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": msg}
@@ -38,6 +43,9 @@ async def send(msg):
         await s.post(url, data=data)
 
 
+# ======================
+# MERCADO
+# ======================
 async def get_pairs():
     async with aiohttp.ClientSession() as s:
         async with s.get(PAIR_LIST) as r:
@@ -56,16 +64,14 @@ def bollinger(values):
     import statistics as st
     mb = st.mean(values)
     sd = st.pstdev(values)
-    up = mb + 2 * sd
-    dn = mb - 2 * sd
-    return up, mb, dn
+    return mb + 2 * sd, mb, mb - 2 * sd
 
 
 def rsi(values, period=14):
-    import math
     gains, losses = [], []
+
     for i in range(1, len(values)):
-        diff = values[i] - values[i-1]
+        diff = values[i] - values[i - 1]
         gains.append(max(0, diff))
         losses.append(abs(min(0, diff)))
 
@@ -74,18 +80,22 @@ def rsi(values, period=14):
 
     if avg_loss == 0:
         return 100
+
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 
+# ======================
+# MONITOR
+# ======================
 async def monitor():
     await asyncio.sleep(5)
     pairs = await get_pairs()
-    print(">>> MONITORANDO PARES SPOT (USDT)")
+
+    print(">>> BOT INICIADO — MONITORANDO PARES USDT")
 
     while True:
         for pair in pairs:
-
             try:
                 k = await get_klines(pair)
                 if "code" in str(k):
@@ -94,24 +104,20 @@ async def monitor():
                 closes = [float(c[4]) for c in k]
                 volumes = [float(c[5]) for c in k]
 
-                # volume 24h
-                vol24 = sum(volumes[-288:]) if len(volumes) >= 288 else 0
+                vol24 = sum(volumes)
                 if vol24 < VOLUME_MIN:
                     continue
 
-                # bollinger
+                # Bollinger
                 up, mb, dn = bollinger(closes[-20:])
+                up_prev, mb_prev, dn_prev = bollinger(closes[-21:-1])
 
-                # bandas abrindo pra BAIXO (largura aumentando + inclinação negativa)
-                width_now = up - dn
-                up_prev, _, dn_prev = bollinger(closes[-21:-1])
-                width_prev = up_prev - dn_prev
+                bandas_abrindo_baixo = (up < up_prev) and (dn < dn_prev)
 
-                bandas_abrindo = width_now > width_prev and up < up_prev and dn < dn_prev
-                if not bandas_abrindo:
+                if not bandas_abrindo_baixo:
                     continue
 
-                # preço descendo
+                # Preço descendo
                 descendo = closes[-1] < closes[-2] < closes[-3]
                 if not descendo:
                     continue
@@ -121,17 +127,16 @@ async def monitor():
                 if rsi_val >= 25:
                     continue
 
-                # cooldown
+                # Cooldown
                 last = cooldown_dict.get(pair, 0)
                 if time.time() - last < COOLDOWN:
                     continue
 
-                # monta alerta
                 nome = pair.replace("USDT", "")
                 preco = closes[-1]
 
                 msg = (
-f"⚠ FUNDO TÉCNICO DETECTADO\n"
+f"⚠ FUNDO TÉCNICO\n"
 f"{nome}\n\n"
 f"Preço: {preco}\n"
 f"RSI: {rsi_val:.2f}\n"
@@ -142,12 +147,17 @@ f"⏰ {now_br()}"
                 await send(msg)
                 cooldown_dict[pair] = time.time()
 
+                print(f">>> ALERTA ENVIADO: {pair}")
+
             except Exception as e:
                 print("ERRO:", e)
 
         await asyncio.sleep(2)
 
 
+# ======================
+# INICIAR LOOP
+# ======================
 def start_async():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -155,3 +165,11 @@ def start_async():
 
 
 threading.Thread(target=start_async, daemon=True).start()
+
+
+# ======================
+# INICIAR FLASK
+# ======================
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
