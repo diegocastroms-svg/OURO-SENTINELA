@@ -2,7 +2,11 @@ import os, asyncio, aiohttp, time, threading
 from datetime import datetime
 from flask import Flask
 
+# =========================
+# CONFIG
+# =========================
 BINANCE = "https://api.binance.com"
+TOP_N = int(os.getenv("TOP_N", "50"))
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
 MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "500000"))
 
@@ -10,6 +14,44 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
 
+# =========================
+# FILTRO DEFINITIVO — SPOT REAL APENAS
+# =========================
+def par_eh_valido(sym):
+    base = sym.replace("USDT", "").upper()
+
+    if sym.endswith("UPUSDT"): return False
+    if sym.endswith("DOWNUSDT"): return False
+    if sym.endswith("BULLUSDT"): return False
+    if sym.endswith("BEARUSDT"): return False
+
+    if base.startswith(("W", "M", "X")):
+        return False
+
+    lixo_contains = (
+        "INU", "PEPE", "FLOKI", "BABY", "CAT", "DOGE2",
+        "SHIB2", "MOON", "MEME", "AI", "OLD", "NEW",
+        "GEN", "PUP", "PUPPY", "TURBO", "WIF", "2", "3"
+    )
+    for k in lixo_contains:
+        if k in base:
+            return False
+
+    bloquear = (
+        "EUR","BRL","TRY","GBP","AUD","CAD","CHF","RUB",
+        "MXN","ZAR","BKRW","BVND","IDRT",
+        "FDUSD","BUSD","TUSD","USDC","USDP","USDE",
+        "PAXG"
+    )
+    if base in bloquear:
+        return False
+
+    return True
+
+
+# =========================
+# FLASK
+# =========================
 app = Flask(__name__)
 
 @app.route("/")
@@ -21,9 +63,11 @@ def health():
     return "OK", 200
 
 
+# =========================
+# FUNÇÕES BÁSICAS
+# =========================
 def now():
     return datetime.now().strftime("%H:%M:%S")
-
 
 async def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -35,7 +79,6 @@ async def send(msg):
     except:
         pass
 
-
 async def get_json(session, url, params=None):
     try:
         async with session.get(url, params=params, timeout=10) as r:
@@ -43,33 +86,8 @@ async def get_json(session, url, params=None):
     except:
         return None
 
-
-# ===============================
-# VALIDA SE O PAR EXISTE DE VERDADE (ORDERBOOK)
-# ===============================
-async def par_existe(session, sym):
-    try:
-        data = await get_json(
-            session,
-            f"{BINANCE}/api/v3/depth",
-            {"symbol": sym, "limit": 1}
-        )
-        if not data:
-            return False
-
-        if "bids" in data and "asks" in data:
-            if len(data["bids"]) > 0 or len(data["asks"]) > 0:
-                return True
-
-        return False
-
-    except:
-        return False
-
-
-async def fetch24(session):
+async def fetch_24hr(session):
     return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
-
 
 async def fetch_klines(session, sym, interval="5m", limit=200):
     return await get_json(
@@ -79,9 +97,9 @@ async def fetch_klines(session, sym, interval="5m", limit=200):
     )
 
 
-# ===============================
+# =========================
 # INDICADORES
-# ===============================
+# =========================
 def ema(values, period):
     if not values:
         return 0.0
@@ -90,7 +108,6 @@ def ema(values, period):
     for v in values[1:]:
         e = v * k + e * (1 - k)
     return e
-
 
 def macd(values):
     if len(values) < 35:
@@ -102,7 +119,6 @@ def macd(values):
     hist = line - signal
     return line, hist
 
-
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50.0
@@ -113,9 +129,9 @@ def rsi(values, period=14):
     return 100.0 - (100.0 / (1.0 + ag / al))
 
 
-# ===============================
-# ALERTA FUNDO
-# ===============================
+# =========================
+# ALERTA DE FUNDO
+# =========================
 _last_alert = {}
 
 async def alerta_fundo(session, sym, opens, closes):
@@ -123,7 +139,6 @@ async def alerta_fundo(session, sym, opens, closes):
     if n < 60:
         return
 
-    # M200
     if n >= 200:
         ema200 = ema(closes[-200:], 200)
     else:
@@ -135,8 +150,8 @@ async def alerta_fundo(session, sym, opens, closes):
     cluster_len = 6
     cluster_opens = opens[-(cluster_len + 1):-1]
     cluster_closes = closes[-(cluster_len + 1):-1]
-    cluster_bodies = [abs(c - o) for o, c in zip(cluster_opens, cluster_closes)]
 
+    cluster_bodies = [abs(c - o) for o, c in zip(cluster_opens, cluster_closes)]
     if not cluster_bodies:
         return
 
@@ -148,36 +163,40 @@ async def alerta_fundo(session, sym, opens, closes):
 
     if big_close <= big_open:
         return
+
     if big_body < avg_body * 2:
         return
 
     pre_region = closes[:-(cluster_len + 1)]
     if len(pre_region) < 5:
         return
+
     if max(pre_region[-20:]) <= max(cluster_closes):
         return
 
     nowt = time.time()
     if nowt - _last_alert.get(sym, 0) < 900:
         return
-
     _last_alert[sym] = nowt
+
+    nome = sym.replace("USDT", "")
 
     msg = (
         "🔔 POSSÍVEL FUNDO DE POÇO\n\n"
-        f"{sym}\n"
+        f"{nome}\n"
+        f"\n"
         f"Preço: {closes[-1]:.6f}\n"
         "Queda antes + lateralização + vela >= 2×."
     )
+
     await send(msg)
     print(f"[{now()}] ALERTA ENVIADO: {sym}")
 
 
-# ===============================
-# LOOP PRINCIPAL — FILTRO SUPREMO REAL-TIME
-# ===============================
+# =========================
+# LOOP PRINCIPAL
+# =========================
 async def monitor_loop():
-
     await send("🟢 OURO-SENTINELA INICIADO")
     print("OURO-SENTINELA RODANDO...")
 
@@ -185,25 +204,30 @@ async def monitor_loop():
         try:
             async with aiohttp.ClientSession() as s:
 
-                data24 = await fetch24(s)
+                data24 = await fetch_24hr(s)
                 if not data24 or isinstance(data24, dict):
                     print(f"[{now()}] Erro ao puxar 24h")
                     await asyncio.sleep(5)
                     continue
 
-                pool = []
+                allow = set(PAIRS.split(",")) if PAIRS else None
 
+                pool = []
                 for x in data24:
                     if not isinstance(x, dict):
                         continue
 
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
-
                     if not sym or not vol:
                         continue
-
                     if not sym.endswith("USDT"):
+                        continue
+
+                    if not par_eh_valido(sym):
+                        continue
+
+                    if allow and sym not in allow:
                         continue
 
                     try:
@@ -212,26 +236,10 @@ async def monitor_loop():
                     except:
                         pass
 
-                # ordenar
-                pool = sorted(pool, key=lambda t: t[1], reverse=True)
-                symbols = [s for s, _ in pool]
-
-                print("\n==============================")
-                print(f"[{now()}] TESTANDO PARES REAIS:")
-                
-                validos = []
+                symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)]
+                print(f"[{now()}] Monitorando {len(symbols)} pares...")
 
                 for sym in symbols:
-                    if await par_existe(s, sym):
-                        validos.append(sym)
-                        print("REAL  ->", sym)
-                    else:
-                        print("FAKE  ->", sym)
-
-                print("==============================\n")
-
-                # analisar apenas os reais
-                for sym in validos:
                     kl = await fetch_klines(s, sym, "5m", 200)
                     if not kl:
                         continue
@@ -248,6 +256,9 @@ async def monitor_loop():
             await asyncio.sleep(5)
 
 
+# =========================
+# THREAD
+# =========================
 def start_bot():
     asyncio.run(monitor_loop())
 
@@ -255,5 +266,8 @@ t = threading.Thread(target=start_bot, daemon=True)
 t.start()
 
 
+# =========================
+# FLASK
+# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
