@@ -1,175 +1,187 @@
-import os, asyncio, aiohttp, time
-from datetime import datetime, timezone, timedelta
+import os, asyncio, aiohttp, time, threading
+from datetime import datetime
 from flask import Flask
-import threading
+
+BINANCE = "https://api.binance.com"
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
+
+SCAN_INTERVAL = 30
+MIN_QV_USDT = 2_000_000
+COOLDOWN = 600
 
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "BOT RSI<25 + BOLLINGER DOWN — ONLINE", 200
+    return "SENTINELA-RSI25 ATIVO", 200
 
 @app.route("/health")
 def health():
     return "OK", 200
 
+def now():
+    return datetime.now().strftime("%H:%M:%S")
 
-# ======================
-# CONFIGURAÇÕES
-# ======================
-BINANCE = "https://api.binance.com"
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT_ID = os.getenv("CHAT_ID", "")
-VOLUME_MIN = 2_000_000
-COOLDOWN = 600
-PAIR_LIST = "https://api.binance.com/api/v3/ticker/price"
-
-cooldown_dict = {}
-
-
-def now_br():
-    return datetime.now(timezone(timedelta(hours=-3))).strftime("%H:%M:%S BR")
-
-
-# ======================
-# TELEGRAM
-# ======================
 async def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("⚠ SEM TOKEN OU CHAT_ID")
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": msg}
-    async with aiohttp.ClientSession() as s:
-        await s.post(url, data=data)
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": msg}
+            )
+    except:
+        pass
 
-
-# ======================
-# MERCADO
-# ======================
-async def get_pairs():
-    async with aiohttp.ClientSession() as s:
-        async with s.get(PAIR_LIST) as r:
-            data = await r.json()
-            return [d["symbol"] for d in data if d["symbol"].endswith("USDT")]
-
-
-async def get_klines(pair):
-    url = f"{BINANCE}/api/v3/klines?symbol={pair}&interval=5m&limit=30"
-    async with aiohttp.ClientSession() as s:
-        async with s.get(url) as r:
+async def get_json(session, url, params=None):
+    try:
+        async with session.get(url, params=params, timeout=10) as r:
             return await r.json()
+    except:
+        return None
 
+async def fetch_24hr(session):
+    return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
 
-def bollinger(values):
-    import statistics as st
-    mb = st.mean(values)
-    sd = st.pstdev(values)
-    return mb + 2 * sd, mb, mb - 2 * sd
+async def fetch_klines(session, sym, limit=50):
+    return await get_json(
+        session,
+        f"{BINANCE}/api/v3/klines",
+        {"symbol": sym, "interval": "5m", "limit": limit}
+    )
 
+# ------------------------ FILTRO ULTRA COMPLETO ------------------------
+def par_eh_valido(sym):
+    base = sym.replace("USDT", "").upper()
 
+    if any(sym.endswith(s) for s in ["UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT"]):
+        return False
+
+    if base.startswith(("W", "M", "X")):
+        return False
+
+    lixo = ("INU","PEPE","FLOKI","BABY","CAT","DOGE2","SHIB2","MOON","MEME","AI","OLD","NEW","PUP","PUPPY","TURBO","WIF","2","3")
+    if any(k in base for k in lixo):
+        return False
+
+    fiat = ("EUR","BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","BKRW","BVND","IDRT")
+    if base in fiat:
+        return False
+
+    stables = ("BUSD","TUSD","FDUSD","USDC","USDP","USDE","USDD","USDX","USDJ","PAXG")
+    if base in stables:
+        return False
+
+    if base.startswith("USD") and base != "USDT":
+        return False
+
+    return True
+
+# ---------------------------- INDICADORES ----------------------------
 def rsi(values, period=14):
-    gains, losses = [], []
+    if len(values) < period + 1:
+        return 50
+    gains = [max(values[i] - values[i - 1], 0) for i in range(1, len(values))]
+    losses = [max(values[i - 1] - values[i], 0) for i in range(1, len(values))]
+    ag = sum(gains[-period:]) / period
+    al = sum(losses[-period:]) / period or 1e-9
+    return 100 - (100 / (1 + ag / al))
 
-    for i in range(1, len(values)):
-        diff = values[i] - values[i - 1]
-        gains.append(max(0, diff))
-        losses.append(abs(min(0, diff)))
+_last_alert = {}
 
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+async def alerta_rsi(session, sym, closes, highs, lows):
+    r = rsi(closes)
 
-    if avg_loss == 0:
-        return 100
+    if r >= 25:
+        return
 
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    mb = sum(closes[-20:]) / 20
+    up = mb + 2 * (sum((c - mb) ** 2 for c in closes[-20:]) / 20) ** 0.5
+    dn = mb - 2 * (sum((c - mb) ** 2 for c in closes[-20:]) / 20) ** 0.5
 
+    if closes[-1] > dn:
+        return
 
-# ======================
-# MONITOR
-# ======================
-async def monitor():
-    await asyncio.sleep(5)
-    pairs = await get_pairs()
+    if lows[-1] > lows[-2] and lows[-2] > lows[-3]:
+        return
 
-    print(">>> BOT INICIADO — MONITORANDO PARES USDT")
+    nowt = time.time()
+    if nowt - _last_alert.get(sym, 0) < COOLDOWN:
+        return
+    _last_alert[sym] = nowt
+
+    nome = sym.replace("USDT", "")
+
+    msg = (
+        f"🔔 RSI < 25\n\n"
+        f"{nome}\n\n"
+        f"Preço: {closes[-1]:.6f}\n"
+        f"Banda inferior + RSI < 25"
+    )
+
+    await send(msg)
+    print(f"[{now()}] ALERTA: {sym}")
+
+# ---------------------------- LOOP PRINCIPAL ----------------------------
+async def monitor_loop():
+    await send("🟢 SENTINELA RSI<25 INICIADO")
+    print("SENTINELA-RSI25 RODANDO...")
 
     while True:
-        for pair in pairs:
-            try:
-                k = await get_klines(pair)
-                if "code" in str(k):
+        try:
+            async with aiohttp.ClientSession() as s:
+
+                data24 = await fetch_24hr(s)
+                if not data24 or isinstance(data24, dict):
+                    print("Erro ao puxar 24h")
+                    await asyncio.sleep(5)
                     continue
 
-                closes = [float(c[4]) for c in k]
-                volumes = [float(c[5]) for c in k]
+                pool = []
+                for x in data24:
+                    sym = x.get("symbol")
+                    vol = x.get("quoteVolume")
+                    if not sym or not vol:
+                        continue
 
-                vol24 = sum(volumes)
-                if vol24 < VOLUME_MIN:
-                    continue
+                    if not sym.endswith("USDT"):
+                        continue
+                    if not par_eh_valido(sym):
+                        continue
 
-                # Bollinger
-                up, mb, dn = bollinger(closes[-20:])
-                up_prev, mb_prev, dn_prev = bollinger(closes[-21:-1])
+                    try:
+                        if float(vol) >= MIN_QV_USDT:
+                            pool.append(sym)
+                    except:
+                        pass
 
-                bandas_abrindo_baixo = (up < up_prev) and (dn < dn_prev)
+                print(f"[{now()}] Monitorando {len(pool)} pares...")
+                for p in pool:
+                    print(f"- {p}")
 
-                if not bandas_abrindo_baixo:
-                    continue
+                for sym in pool:
+                    kl = await fetch_klines(s, sym)
+                    if not kl:
+                        continue
 
-                # Preço descendo
-                descendo = closes[-1] < closes[-2] < closes[-3]
-                if not descendo:
-                    continue
+                    closes = [float(k[4]) for k in kl]
+                    highs  = [float(k[2]) for k in kl]
+                    lows   = [float(k[3]) for k in kl]
 
-                # RSI
-                rsi_val = rsi(closes)
-                if rsi_val >= 25:
-                    continue
+                    await alerta_rsi(s, sym, closes, highs, lows)
 
-                # Cooldown
-                last = cooldown_dict.get(pair, 0)
-                if time.time() - last < COOLDOWN:
-                    continue
+                await asyncio.sleep(SCAN_INTERVAL)
 
-                nome = pair.replace("USDT", "")
-                preco = closes[-1]
+        except Exception as e:
+            print(f"[{now()}] ERRO LOOP: {e}")
+            await asyncio.sleep(5)
 
-                msg = (
-f"⚠ FUNDO TÉCNICO\n"
-f"{nome}\n\n"
-f"Preço: {preco}\n"
-f"RSI: {rsi_val:.2f}\n"
-f"Bollinger abrindo para baixo + preço descendo\n"
-f"⏰ {now_br()}"
-                )
+def start_bot():
+    asyncio.run(monitor_loop())
 
-                await send(msg)
-                cooldown_dict[pair] = time.time()
+threading.Thread(target=start_bot, daemon=True).start()
 
-                print(f">>> ALERTA ENVIADO: {pair}")
-
-            except Exception as e:
-                print("ERRO:", e)
-
-        await asyncio.sleep(2)
-
-
-# ======================
-# INICIAR LOOP
-# ======================
-def start_async():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(monitor())
-
-
-threading.Thread(target=start_async, daemon=True).start()
-
-
-# ======================
-# INICIAR FLASK
-# ======================
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
