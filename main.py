@@ -2,11 +2,7 @@ import os, asyncio, aiohttp, time, threading
 from datetime import datetime
 from flask import Flask
 
-# =========================
-# CONFIG
-# =========================
 BINANCE = "https://api.binance.com"
-TOP_N = int(os.getenv("TOP_N", "50"))
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
 MIN_QV_USDT = float(os.getenv("MIN_QV_USDT", "500000"))
 
@@ -14,10 +10,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
 
-
-# =========================
-# FLASK
-# =========================
 app = Flask(__name__)
 
 @app.route("/")
@@ -29,11 +21,9 @@ def health():
     return "OK", 200
 
 
-# =========================
-# FUNÇÕES BÁSICAS
-# =========================
 def now():
     return datetime.now().strftime("%H:%M:%S")
+
 
 async def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -45,6 +35,7 @@ async def send(msg):
     except:
         pass
 
+
 async def get_json(session, url, params=None):
     try:
         async with session.get(url, params=params, timeout=10) as r:
@@ -53,37 +44,33 @@ async def get_json(session, url, params=None):
         return None
 
 
-# =========================
-# BUSCAR LISTA REAL DE PARES SPOT
-# =========================
-async def fetch_spot_pairs():
-    async with aiohttp.ClientSession() as s:
-        data = await get_json(s, f"{BINANCE}/api/v3/exchangeInfo")
-        spot = set()
+# ===============================
+# VALIDA SE O PAR EXISTE DE VERDADE (ORDERBOOK)
+# ===============================
+async def par_existe(session, sym):
+    try:
+        data = await get_json(
+            session,
+            f"{BINANCE}/api/v3/depth",
+            {"symbol": sym, "limit": 1}
+        )
+        if not data:
+            return False
 
-        if not data or "symbols" not in data:
-            return spot
+        if "bids" in data and "asks" in data:
+            if len(data["bids"]) > 0 or len(data["asks"]) > 0:
+                return True
 
-        for x in data["symbols"]:
-            if (
-                x.get("status") == "TRADING"
-                and x.get("isSpotTradingAllowed") == True
-            ):
-                spot.add(x["symbol"])
+        return False
 
-        return spot
+    except:
+        return False
 
 
-# =========================
-# 24h (NOME CONSERTADO)
-# =========================
 async def fetch24(session):
     return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
 
 
-# =========================
-# KL Ines
-# =========================
 async def fetch_klines(session, sym, interval="5m", limit=200):
     return await get_json(
         session,
@@ -92,9 +79,9 @@ async def fetch_klines(session, sym, interval="5m", limit=200):
     )
 
 
-# =========================
+# ===============================
 # INDICADORES
-# =========================
+# ===============================
 def ema(values, period):
     if not values:
         return 0.0
@@ -103,6 +90,7 @@ def ema(values, period):
     for v in values[1:]:
         e = v * k + e * (1 - k)
     return e
+
 
 def macd(values):
     if len(values) < 35:
@@ -114,6 +102,7 @@ def macd(values):
     hist = line - signal
     return line, hist
 
+
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50.0
@@ -124,9 +113,9 @@ def rsi(values, period=14):
     return 100.0 - (100.0 / (1.0 + ag / al))
 
 
-# =========================
-# ALERTA DE FUNDO
-# =========================
+# ===============================
+# ALERTA FUNDO
+# ===============================
 _last_alert = {}
 
 async def alerta_fundo(session, sym, opens, closes):
@@ -143,7 +132,6 @@ async def alerta_fundo(session, sym, opens, closes):
     if closes[-1] > ema200:
         return
 
-    # Lateralização
     cluster_len = 6
     cluster_opens = opens[-(cluster_len + 1):-1]
     cluster_closes = closes[-(cluster_len + 1):-1]
@@ -172,41 +160,37 @@ async def alerta_fundo(session, sym, opens, closes):
     nowt = time.time()
     if nowt - _last_alert.get(sym, 0) < 900:
         return
+
     _last_alert[sym] = nowt
 
     msg = (
         "🔔 POSSÍVEL FUNDO DE POÇO\n\n"
         f"{sym}\n"
         f"Preço: {closes[-1]:.6f}\n"
-        "Queda antes + lateralização + vela de rompimento >= 2×."
+        "Queda antes + lateralização + vela >= 2×."
     )
     await send(msg)
     print(f"[{now()}] ALERTA ENVIADO: {sym}")
 
 
-# =========================
-# LOOP PRINCIPAL
-# =========================
+# ===============================
+# LOOP PRINCIPAL — FILTRO SUPREMO REAL-TIME
+# ===============================
 async def monitor_loop():
 
     await send("🟢 OURO-SENTINELA INICIADO")
     print("OURO-SENTINELA RODANDO...")
 
-    spot_pairs = await fetch_spot_pairs()
-    print(f"[{now()}] PARES SPOT REAIS ENCONTRADOS: {len(spot_pairs)}")
-
     while True:
         try:
             async with aiohttp.ClientSession() as s:
 
-                data24 = await fetch24(s)  # ← CORRIGIDO AQUI
-
+                data24 = await fetch24(s)
                 if not data24 or isinstance(data24, dict):
                     print(f"[{now()}] Erro ao puxar 24h")
                     await asyncio.sleep(5)
                     continue
 
-                allow = set(PAIRS.split(",")) if PAIRS else None
                 pool = []
 
                 for x in data24:
@@ -218,11 +202,8 @@ async def monitor_loop():
 
                     if not sym or not vol:
                         continue
+
                     if not sym.endswith("USDT"):
-                        continue
-                    if sym not in spot_pairs:
-                        continue
-                    if allow and sym not in allow:
                         continue
 
                     try:
@@ -231,15 +212,26 @@ async def monitor_loop():
                     except:
                         pass
 
-                symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)]
+                # ordenar
+                pool = sorted(pool, key=lambda t: t[1], reverse=True)
+                symbols = [s for s, _ in pool]
 
                 print("\n==============================")
-                print(f"[{now()}] MONITORANDO {len(symbols)} PARES:")
-                for s in symbols:
-                    print("-", s)
-                print("==============================\n")
+                print(f"[{now()}] TESTANDO PARES REAIS:")
+                
+                validos = []
 
                 for sym in symbols:
+                    if await par_existe(s, sym):
+                        validos.append(sym)
+                        print("REAL  ->", sym)
+                    else:
+                        print("FAKE  ->", sym)
+
+                print("==============================\n")
+
+                # analisar apenas os reais
+                for sym in validos:
                     kl = await fetch_klines(s, sym, "5m", 200)
                     if not kl:
                         continue
@@ -256,9 +248,6 @@ async def monitor_loop():
             await asyncio.sleep(5)
 
 
-# =========================
-# THREAD
-# =========================
 def start_bot():
     asyncio.run(monitor_loop())
 
@@ -266,8 +255,5 @@ t = threading.Thread(target=start_bot, daemon=True)
 t.start()
 
 
-# =========================
-# FLASK
-# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
