@@ -14,8 +14,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PAIRS = os.getenv("PAIRS", "").strip()
 
+
 # =========================
-# FLASK (Render exige)
+# FLASK
 # =========================
 app = Flask(__name__)
 
@@ -65,12 +66,30 @@ async def fetch_spot_pairs():
 
         for x in data["symbols"]:
             if (
-                x.get("status") == "TRADING" and
-                x.get("isSpotTradingAllowed") == True
+                x.get("status") == "TRADING"
+                and x.get("isSpotTradingAllowed") == True
             ):
                 spot.add(x["symbol"])
 
         return spot
+
+
+# =========================
+# 24h (NOME CONSERTADO)
+# =========================
+async def fetch24(session):
+    return await get_json(session, f"{BINANCE}/api/v3/ticker/24hr")
+
+
+# =========================
+# KL Ines
+# =========================
+async def fetch_klines(session, sym, interval="5m", limit=200):
+    return await get_json(
+        session,
+        f"{BINANCE}/api/v3/klines",
+        {"symbol": sym, "interval": interval, "limit": limit}
+    )
 
 
 # =========================
@@ -124,18 +143,17 @@ async def alerta_fundo(session, sym, opens, closes):
     if closes[-1] > ema200:
         return
 
-    # Lateral
+    # Lateralização
     cluster_len = 6
     cluster_opens = opens[-(cluster_len + 1):-1]
     cluster_closes = closes[-(cluster_len + 1):-1]
-
     cluster_bodies = [abs(c - o) for o, c in zip(cluster_opens, cluster_closes)]
+
     if not cluster_bodies:
         return
 
     avg_body = sum(cluster_bodies) / len(cluster_bodies)
 
-    # Vela >= 2× maior
     big_open = opens[-1]
     big_close = closes[-1]
     big_body = abs(big_close - big_open)
@@ -145,14 +163,12 @@ async def alerta_fundo(session, sym, opens, closes):
     if big_body < avg_body * 2:
         return
 
-    # queda antes (sem %. apenas queda visual real)
     pre_region = closes[:-(cluster_len + 1)]
     if len(pre_region) < 5:
         return
     if max(pre_region[-20:]) <= max(cluster_closes):
         return
 
-    # cooldown
     nowt = time.time()
     if nowt - _last_alert.get(sym, 0) < 900:
         return
@@ -172,26 +188,27 @@ async def alerta_fundo(session, sym, opens, closes):
 # LOOP PRINCIPAL
 # =========================
 async def monitor_loop():
+
     await send("🟢 OURO-SENTINELA INICIADO")
     print("OURO-SENTINELA RODANDO...")
 
-    print(f"[{now()}] Baixando lista REAL de pares spot...")
     spot_pairs = await fetch_spot_pairs()
-    print(f"[{now()}] Total de pares spot reais: {len(spot_pairs)}")
+    print(f"[{now()}] PARES SPOT REAIS ENCONTRADOS: {len(spot_pairs)}")
 
     while True:
         try:
             async with aiohttp.ClientSession() as s:
 
-                data24 = await fetch_24hr(s)
+                data24 = await fetch24(s)  # ← CORRIGIDO AQUI
+
                 if not data24 or isinstance(data24, dict):
                     print(f"[{now()}] Erro ao puxar 24h")
                     await asyncio.sleep(5)
                     continue
 
                 allow = set(PAIRS.split(",")) if PAIRS else None
-
                 pool = []
+
                 for x in data24:
                     if not isinstance(x, dict):
                         continue
@@ -203,12 +220,8 @@ async def monitor_loop():
                         continue
                     if not sym.endswith("USDT"):
                         continue
-
-                    # FILTRO SUPREMO: só SPOT REAL
                     if sym not in spot_pairs:
                         continue
-
-                    # filtro por allow
                     if allow and sym not in allow:
                         continue
 
@@ -220,9 +233,8 @@ async def monitor_loop():
 
                 symbols = [s for s, _ in sorted(pool, key=lambda t: t[1], reverse=True)]
 
-                # nova impressão completa no LOG do Render
                 print("\n==============================")
-                print(f"[{now()}] MONITORANDO {len(symbols)} PARES SPOT REAIS:")
+                print(f"[{now()}] MONITORANDO {len(symbols)} PARES:")
                 for s in symbols:
                     print("-", s)
                 print("==============================\n")
@@ -245,7 +257,7 @@ async def monitor_loop():
 
 
 # =========================
-# THREAD PARA RODAR O BOT
+# THREAD
 # =========================
 def start_bot():
     asyncio.run(monitor_loop())
@@ -255,7 +267,7 @@ t.start()
 
 
 # =========================
-# FLASK RODANDO PARA O RENDER ACEITAR
+# FLASK
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
