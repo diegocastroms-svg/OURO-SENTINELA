@@ -15,7 +15,7 @@ TIMEFRAME = "15m"
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "SENTINELA-RSI35 15M ATIVO", 200
+    return "SENTINELA-RSI38 15M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -91,8 +91,10 @@ def rsi(values, period=14):
 _last_alert = {}
 
 async def alerta_rsi(session, sym, closes, highs, lows):
+
+    # 🔥 CORRIGIDO: ERA 35 → AGORA 38
     r = rsi(closes)
-    if r >= 35:
+    if r >= 38:
         return
 
     mb = sum(closes[-20:]) / 20
@@ -114,19 +116,19 @@ async def alerta_rsi(session, sym, closes, highs, lows):
     nome = sym.replace("USDT", "")
 
     msg = (
-        f"🔔 RSI < 35\n\n"
+        f"🔔 RSI < 38\n\n"
         f"{nome}\n\n"
         f"Preço: {closes[-1]:.6f}\n"
         f"RSI: {r:.2f}\n"
-        f"Banda inferior + RSI < 35"
+        f"Banda inferior + RSI < 38"
     )
 
     await send(msg)
     print(f"[{now()}] ALERTA: {sym}")
 
 async def monitor_loop():
-    await send("🟢 SENTINELA RSI<35 15M INICIADO")
-    print("SENTINELA-RSI35 15M RODANDO...")
+    await send("🟢 SENTINELA RSI<38 15M INICIADO")
+    print("SENTINELA-RSI38 15M RODANDO...")
 
     while True:
         try:
