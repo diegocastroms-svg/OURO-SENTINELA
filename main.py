@@ -9,13 +9,13 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
 MIN_QV_USDT = 2_000_000
-COOLDOWN = 900          # <<< VOLTOU PARA 15 MIN
-TIMEFRAME = "15m"
+COOLDOWN = 1800          # <<< 30 MIN
+TIMEFRAME = "1h"         # <<< AGORA 1H
 
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "SENTINELA-RSI35 15M ATIVO", 200
+    return "SENTINELA-RSI40 1H ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -93,12 +93,11 @@ _last_alert = {}
 async def alerta_rsi(session, sym, closes, highs, lows):
     r = rsi(closes)
 
-    if r >= 35:        # <<< VOLTOU PARA 35
+    if r >= 40:        # <<< RSI 40
         return
 
     mb = sum(closes[-20:]) / 20
     sd = (sum((c - mb) ** 2 for c in closes[-20:]) / 20) ** 0.5
-    up = mb + 2 * sd
     dn = mb - 2 * sd
 
     if closes[-1] > dn:
@@ -115,19 +114,19 @@ async def alerta_rsi(session, sym, closes, highs, lows):
     nome = sym.replace("USDT", "")
 
     msg = (
-        f"🔔 RSI < 35\n\n"
+        f"🔔 RSI < 40 (1H)\n\n"
         f"{nome}\n\n"
         f"Preço: {closes[-1]:.6f}\n"
         f"RSI: {r:.2f}\n"
-        f"Banda inferior + RSI < 35"
+        f"Banda inferior + RSI < 40 (1H)"
     )
 
     await send(msg)
     print(f"[{now()}] ALERTA: {sym}")
 
 async def monitor_loop():
-    await send("🟢 SENTINELA RSI<35 15M INICIADO")
-    print("SENTINELA-RSI35 15M RODANDO...")
+    await send("🟢 SENTINELA RSI<40 1H INICIADO")
+    print("SENTINELA-RSI40 1H RODANDO...")
 
     while True:
         try:
