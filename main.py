@@ -9,13 +9,13 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
 MIN_QV_USDT = 2_000_000
-COOLDOWN = 1800          # <<< 30 MIN
-TIMEFRAME = "1h"         # <<< AGORA 1H
+COOLDOWN = 900            # 15 minutos
+TIMEFRAME = "15m"         # timeframe corrigido
 
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "SENTINELA-RSI40 1H ATIVO", 200
+    return "SENTINELA-RSI35 15M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -53,47 +53,55 @@ async def fetch_klines(session, sym, limit=50):
         {"symbol": sym, "interval": TIMEFRAME, "limit": limit}
     )
 
+# =====================================================
+# BLOCO CORRIGIDO — LISTA EXATA DAS BLOQUEADAS DA FOTO
+# =====================================================
 def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper()
 
-    if any(sym.endswith(s) for s in ["UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT"]):
+    # impedir UP/DOWN
+    if any(sym.endswith(s) for s in ["UPUSDT", "DOWNUSDT"]):
         return False
 
-    if base.startswith(("W", "M", "X")):
+    # BLOQUEADAS DA FOTO (EXATAMENTE COMO VOCÊ MANDOU)
+    bloqueadas = (
+        "UP", "DOWN", "BUSD", "FDUSD", "USDC", "TUSD",
+        "EUR", "USDE", "TRY", "GBP", "BRL", "AUD", "CAD"
+    )
+    if base in bloqueadas:
         return False
 
-    lixo = ("INU","PEPE","FLOKI","BABY","CAT","DOGE2","SHIB2","MOON","MEME","AI","OLD","NEW","PUP","PUPPY","TURBO","WIF","2","3")
-    if any(k in base for k in lixo):
-        return False
-
-    fiat = ("EUR","BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","BKRW","BVND","IDRT")
-    if base in fiat:
-        return False
-
-    stables = ("BUSD","TUSD","FDUSD","USDC","USDP","USDE","USDD","USDX","USDJ","PAXG")
-    if base in stables:
-        return False
-
+    # bloquear USD1 / USD2 / USD3 / USDX
     if base.startswith("USD") and base != "USDT":
         return False
 
     return True
 
+# =====================================================
+# CÁLCULO DE RSI
+# =====================================================
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50
+
     gains = [max(values[i] - values[i - 1], 0) for i in range(1, len(values))]
     losses = [max(values[i - 1] - values[i], 0) for i in range(1, len(values))]
+
     ag = sum(gains[-period:]) / period
     al = sum(losses[-period:]) / period or 1e-9
+
     return 100 - (100 / (1 + ag / al))
+
 
 _last_alert = {}
 
+# =====================================================
+# ALERTA RSI < 35 NA BANDA INFERIOR
+# =====================================================
 async def alerta_rsi(session, sym, closes, highs, lows):
     r = rsi(closes)
 
-    if r >= 40:        # <<< RSI 40
+    if r >= 35:
         return
 
     mb = sum(closes[-20:]) / 20
@@ -101,9 +109,6 @@ async def alerta_rsi(session, sym, closes, highs, lows):
     dn = mb - 2 * sd
 
     if closes[-1] > dn:
-        return
-
-    if lows[-1] > lows[-2] and lows[-2] > lows[-3]:
         return
 
     nowt = time.time()
@@ -114,19 +119,22 @@ async def alerta_rsi(session, sym, closes, highs, lows):
     nome = sym.replace("USDT", "")
 
     msg = (
-        f"🔔 RSI < 40 (1H)\n\n"
+        f"🔔 RSI < 35\n\n"
         f"{nome}\n\n"
         f"Preço: {closes[-1]:.6f}\n"
         f"RSI: {r:.2f}\n"
-        f"Banda inferior + RSI < 40 (1H)"
+        f"Banda inferior + RSI < 35"
     )
 
     await send(msg)
     print(f"[{now()}] ALERTA: {sym}")
 
+# =====================================================
+# MONITOR LOOP
+# =====================================================
 async def monitor_loop():
-    await send("🟢 SENTINELA RSI<40 1H INICIADO")
-    print("SENTINELA-RSI40 1H RODANDO...")
+    await send("🟢 SENTINELA RSI<35 15M INICIADO")
+    print("SENTINELA-RSI35 15M RODANDO...")
 
     while True:
         try:
@@ -177,6 +185,9 @@ async def monitor_loop():
             print(f"[{now()}] ERRO LOOP: {e}")
             await asyncio.sleep(5)
 
+# =====================================================
+# START BOT
+# =====================================================
 def start_bot():
     asyncio.run(monitor_loop())
 
