@@ -9,8 +9,8 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
 MIN_QV_USDT = 2_000_000
-COOLDOWN = 900            # 15 minutos
-TIMEFRAME = "15m"         # timeframe corrigido
+COOLDOWN = 900  # 15 minutos
+TIMEFRAME = "15m"
 
 app = Flask(__name__)
 @app.route("/")
@@ -53,9 +53,9 @@ async def fetch_klines(session, sym, limit=50):
         {"symbol": sym, "interval": TIMEFRAME, "limit": limit}
     )
 
-# =====================================================
-# BLOCO CORRIGIDO — LISTA EXATA DAS BLOQUEADAS DA FOTO
-# =====================================================
+# -------------------------------------------------------------------
+# FILTRO DEFINITIVO (INCLUÍDO BFUSD AQUI)
+# -------------------------------------------------------------------
 def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper()
 
@@ -63,52 +63,52 @@ def par_eh_valido(sym):
     if any(sym.endswith(s) for s in ["UPUSDT", "DOWNUSDT"]):
         return False
 
-    # BLOQUEADAS DA FOTO (EXATAMENTE COMO VOCÊ MANDOU)
+    # BLOQUEADAS + BFUSD
     bloqueadas = (
         "UP", "DOWN", "BUSD", "FDUSD", "USDC", "TUSD",
-        "EUR", "USDE", "TRY", "GBP", "BRL", "AUD", "CAD"
+        "EUR", "USDE", "TRY", "GBP", "BRL", "AUD", "CAD",
+        "BFUSD"
     )
     if base in bloqueadas:
         return False
 
-    # bloquear USD1 / USD2 / USD3 / USDX
+    # bloquear USD1 / USD2 / USDX / etc
     if base.startswith("USD") and base != "USDT":
         return False
 
     return True
 
-# =====================================================
-# CÁLCULO DE RSI
-# =====================================================
+# -------------------------------------------------------------------
+# RSI
+# -------------------------------------------------------------------
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50
-
     gains = [max(values[i] - values[i - 1], 0) for i in range(1, len(values))]
     losses = [max(values[i - 1] - values[i], 0) for i in range(1, len(values))]
-
     ag = sum(gains[-period:]) / period
     al = sum(losses[-period:]) / period or 1e-9
-
     return 100 - (100 / (1 + ag / al))
-
 
 _last_alert = {}
 
-# =====================================================
-# ALERTA RSI < 35 NA BANDA INFERIOR
-# =====================================================
+# -------------------------------------------------------------------
+# ALERTA
+# -------------------------------------------------------------------
 async def alerta_rsi(session, sym, closes, highs, lows):
     r = rsi(closes)
-
     if r >= 35:
         return
 
     mb = sum(closes[-20:]) / 20
     sd = (sum((c - mb) ** 2 for c in closes[-20:]) / 20) ** 0.5
+    up = mb + 2 * sd
     dn = mb - 2 * sd
 
     if closes[-1] > dn:
+        return
+
+    if lows[-1] > lows[-2] and lows[-2] > lows[-3]:
         return
 
     nowt = time.time()
@@ -129,9 +129,9 @@ async def alerta_rsi(session, sym, closes, highs, lows):
     await send(msg)
     print(f"[{now()}] ALERTA: {sym}")
 
-# =====================================================
-# MONITOR LOOP
-# =====================================================
+# -------------------------------------------------------------------
+# LOOP PRINCIPAL
+# -------------------------------------------------------------------
 async def monitor_loop():
     await send("🟢 SENTINELA RSI<35 15M INICIADO")
     print("SENTINELA-RSI35 15M RODANDO...")
@@ -185,9 +185,6 @@ async def monitor_loop():
             print(f"[{now()}] ERRO LOOP: {e}")
             await asyncio.sleep(5)
 
-# =====================================================
-# START BOT
-# =====================================================
 def start_bot():
     asyncio.run(monitor_loop())
 
