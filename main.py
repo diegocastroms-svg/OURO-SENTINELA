@@ -10,8 +10,8 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 SCAN_INTERVAL = 30
 MIN_QV_USDT = 2_000_000
 
-COOLDOWN_15M = 900       # 15 minutos
-COOLDOWN_1H  = 1800      # 30 minutos
+COOLDOWN_15M = 900
+COOLDOWN_1H  = 1800
 
 app = Flask(__name__)
 @app.route("/")
@@ -54,9 +54,6 @@ async def fetch_klines(session, sym, interval, limit=50):
         {"symbol": sym, "interval": interval, "limit": limit}
     )
 
-# -------------------------------------------------------------------
-# FILTRO DEFINITIVO (inclui BFUSD)
-# -------------------------------------------------------------------
 def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper()
 
@@ -76,14 +73,11 @@ def par_eh_valido(sym):
 
     return True
 
-# -------------------------------------------------------------------
-# RSI
-# -------------------------------------------------------------------
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50
-    gains  = [max(values[i] - values[i-1], 0) for i in range(1, len(values))]
-    losses = [max(values[i-1] - values[i], 0) for i in range(1, len(values))]
+    gains  = [max(values[i]-values[i-1],0) for i in range(1,len(values))]
+    losses = [max(values[i-1]-values[i],0) for i in range(1,len(values))]
     ag = sum(gains[-period:])  / period
     al = sum(losses[-period:]) / period or 1e-9
     return 100 - (100 / (1 + ag / al))
@@ -91,9 +85,9 @@ def rsi(values, period=14):
 _last_alert_15m = {}
 _last_alert_1h  = {}
 
-# -------------------------------------------------------------------
-# ALERTA RSI 15M
-# -------------------------------------------------------------------
+# --------------------------------------------
+# ALERTA 15M — LAYOUT NOVO (AMARELO)
+# --------------------------------------------
 async def alerta_rsi_15m(session, sym, closes, highs, lows):
     r = rsi(closes)
     if r >= 35:
@@ -112,19 +106,21 @@ async def alerta_rsi_15m(session, sym, closes, highs, lows):
     _last_alert_15m[sym] = nowt
 
     nome = sym.replace("USDT","")
+
     msg = (
-        f"🔔 RSI < 35 (15m)\n\n"
-        f"{nome}\n\n"
+        f"🔶 FUNDO 15M — RSI < 35 🔶\n\n"
+        f"Moeda: {nome}\n\n"
         f"Preço: {closes[-1]:.6f}\n"
-        f"RSI: {r:.2f}\n"
-        "Banda inferior + RSI < 35 (15m)"
+        f"RSI: {r:.2f}\n\n"
+        f"Banda inferior tocada no 15m."
     )
+
     await send(msg)
     print(f"[{now()}] ALERTA 15M: {sym}")
 
-# -------------------------------------------------------------------
-# ALERTA RSI 1H (NOVO)
-# -------------------------------------------------------------------
+# --------------------------------------------
+# ALERTA 1H — LAYOUT NOVO (AZUL)
+# --------------------------------------------
 async def alerta_rsi_1h(session, sym, closes, highs, lows):
     r = rsi(closes)
     if r >= 40:
@@ -143,19 +139,22 @@ async def alerta_rsi_1h(session, sym, closes, highs, lows):
     _last_alert_1h[sym] = nowt
 
     nome = sym.replace("USDT","")
+
     msg = (
-        f"🔔 RSI < 40 (1H)\n\n"
-        f"{nome}\n\n"
-        f"Preço: {closes[-1]:.6f}\n"
-        f"RSI: {r:.2f}\n"
-        "Banda inferior + RSI < 40 (1H)"
+        f"🔷 FUNDO 1H — RSI < 40 🔷\n\n"
+        f"Ativo: {nome}\n\n"
+        f"Preço atual: {closes[-1]:.6f}\n"
+        f"RSI (1H): {r:.2f}\n\n"
+        "Queda + banda inferior no 1H detectadas.\n"
+        "Possível fundo mais forte."
     )
+
     await send(msg)
     print(f"[{now()}] ALERTA 1H: {sym}")
 
-# -------------------------------------------------------------------
+# --------------------------------------------
 # MONITOR
-# -------------------------------------------------------------------
+# --------------------------------------------
 async def monitor_loop():
     await send("🟢 SENTINELA RSI 15M + 1H INICIADO")
     print("SENTINELA-RSI 15M + 1H RODANDO...")
@@ -192,7 +191,6 @@ async def monitor_loop():
 
                 for sym in pool:
 
-                    # --- 15M ---
                     kl_15 = await fetch_klines(s, sym, "15m")
                     if kl_15:
                         closes = [float(k[4]) for k in kl_15]
@@ -200,7 +198,6 @@ async def monitor_loop():
                         lows   = [float(k[3]) for k in kl_15]
                         await alerta_rsi_15m(s, sym, closes, highs, lows)
 
-                    # --- 1H ---
                     kl_1h = await fetch_klines(s, sym, "1h")
                     if kl_1h:
                         closes_h = [float(k[4]) for k in kl_1h]
