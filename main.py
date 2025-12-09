@@ -16,9 +16,9 @@ TF_4H = "4h"
 TF_1D = "1d"
 
 # cooldowns
-COOLDOWN_1H = 900      # 15 min
-COOLDOWN_4H = 1800     # 30 min
-COOLDOWN_1D = 43200    # 12 horas
+COOLDOWN_1H = 900       # 15 min
+COOLDOWN_4H = 1800      # 30 min
+COOLDOWN_1D = 43200     # 12 horas
 
 app = Flask(__name__)
 @app.route("/")
@@ -67,7 +67,6 @@ async def fetch_klines(session, sym, interval, limit=50):
 def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper()
 
-    # moedas lixo, fiat e instáveis
     invalid = (
         "BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB",
         "BKRW","BVND","IDRT",
@@ -110,10 +109,10 @@ _last_alert_1h = {}
 _last_alert_4h = {}
 _last_alert_1d = {}
 
-# ---- ALERTA 1H (RSI 35)
+# ---- ALERTA 1H (RSI < 30)
 async def alerta_rsi_1h(session, sym, closes, highs, lows):
     r = rsi(closes)
-    if r >= 35:
+    if r >= 30:
         return
 
     mb = sum(closes[-20:]) / 20
@@ -129,7 +128,7 @@ async def alerta_rsi_1h(session, sym, closes, highs, lows):
 
     nome = sym.replace("USDT", "")
     msg = (
-        f"🔵 RSI 1H < 35\n\n"
+        f"🔵 RSI 1H < 30\n\n"
         f"{nome}\n\n"
         f"Preço: {closes[-1]:.6f}\n"
         f"RSI: {r:.2f}"
@@ -137,10 +136,10 @@ async def alerta_rsi_1h(session, sym, closes, highs, lows):
     await send(msg)
     print(f"[{now()}] ALERTA 1H: {sym}")
 
-# ---- ALERTA 4H (RSI 38)
+# ---- ALERTA 4H (RSI < 35)
 async def alerta_rsi_4h(session, sym, closes, highs, lows):
     r = rsi(closes)
-    if r >= 38:
+    if r >= 35:
         return
 
     mb = sum(closes[-20:]) / 20
@@ -156,7 +155,7 @@ async def alerta_rsi_4h(session, sym, closes, highs, lows):
 
     nome = sym.replace("USDT", "")
     msg = (
-        f"🟠 RSI 4H < 38\n\n"
+        f"🟠 RSI 4H < 35\n\n"
         f"{nome}\n\n"
         f"Preço: {closes[-1]:.6f}\n"
         f"RSI: {r:.2f}"
@@ -164,10 +163,10 @@ async def alerta_rsi_4h(session, sym, closes, highs, lows):
     await send(msg)
     print(f"[{now()}] ALERTA 4H: {sym}")
 
-# ---- ALERTA 1D (RSI 38) — NOVO
+# ---- ALERTA 1D (RSI < 35)
 async def alerta_rsi_1d(session, sym, closes, highs, lows):
     r = rsi(closes)
-    if r >= 38:
+    if r >= 35:
         return
 
     mb = sum(closes[-20:]) / 20
@@ -183,7 +182,7 @@ async def alerta_rsi_1d(session, sym, closes, highs, lows):
 
     nome = sym.replace("USDT", "")
     msg = (
-        f"🟣 RSI 1D < 38\n\n"
+        f"🟣 RSI 1D < 35\n\n"
         f"{nome}\n\n"
         f"Preço: {closes[-1]:.6f}\n"
         f"RSI (1D): {r:.2f}\n"
@@ -242,7 +241,7 @@ async def monitor_loop():
                         lows   = [float(k[3]) for k in kl_4h]
                         await alerta_rsi_4h(s, sym, closes, highs, lows)
 
-                    # ==== 1D (NOVO) ====
+                    # ==== 1D ====
                     kl_1d = await fetch_klines(s, sym, TF_1D)
                     if kl_1d:
                         closes = [float(k[4]) for k in kl_1d]
