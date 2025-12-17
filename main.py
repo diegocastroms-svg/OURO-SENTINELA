@@ -1,4 +1,3 @@
-
 import os, asyncio, aiohttp, time, threading
 from datetime import datetime
 from flask import Flask
@@ -17,7 +16,7 @@ TF_4H = "4h"
 TF_1D = "1d"
 
 # cooldowns
-COOLDOWN_1H = 1800       # 30 min
+COOLDOWN_1H = 900       # 15 min
 COOLDOWN_4H = 7200      # 2 horas
 COOLDOWN_1D = 43200     # 12 horas
 
@@ -112,6 +111,8 @@ _last_alert_1d = {}
 
 # ---- ALERTA 1H (RSI < 35)
 async def alerta_rsi_1h(session, sym, closes, highs, lows):
+    return
+
     r = rsi(closes)
     if r >= 35:
         return
