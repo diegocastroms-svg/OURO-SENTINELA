@@ -18,7 +18,7 @@ TF_1D = "1d"
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "SENTINELA MULTI-TIMEFRAME ATIVO", 200
+    return "SENTINELA BREAKOUT MULTI-TF", 200
 
 @app.route("/health")
 def health():
@@ -81,25 +81,20 @@ def par_eh_valido(sym):
 
     return True
 
-def rsi(values, period=14):
-    if len(values) < period + 1:
-        return 50
-    gains = [max(values[i] - values[i-1], 0) for i in range(1, len(values))]
-    losses = [max(values[i-1] - values[i], 0) for i in range(1, len(values))]
-    ag = sum(gains[-period:]) / period
-    al = sum(losses[-period:]) / period or 1e-9
-    return 100 - (100 / (1 + ag / al))
 
-_last_candle_15m = {}
+_last_candle = {}
 
-async def alerta_breakout_15m(session, sym, klines):
+
+async def alerta_breakout(session, sym, klines, tf, emoji):
 
     candle_time = klines[-1][0]
 
-    if _last_candle_15m.get(sym) == candle_time:
+    key = sym + tf
+
+    if _last_candle.get(key) == candle_time:
         return
 
-    _last_candle_15m[sym] = candle_time
+    _last_candle[key] = candle_time
 
     closes = [float(k[4]) for k in klines]
     highs  = [float(k[2]) for k in klines]
@@ -124,56 +119,30 @@ async def alerta_breakout_15m(session, sym, klines):
     if vol_atual > vol_media and last_close > high5:
 
         msg = (
-            f"🚀 BREAKOUT 15M LONG\n\n"
+            f"{emoji} BREAKOUT {tf} LONG\n\n"
             f"{nome}\n\n"
             f"Preço: {last_close:.6f}"
         )
 
         await send(msg)
-        print(f"[{now()}] BREAKOUT LONG {sym}")
+        print(f"[{now()}] LONG {sym} {tf}")
 
     if vol_atual > vol_media and last_close < low5:
 
         msg = (
-            f"🔻 BREAKOUT 15M SHORT\n\n"
+            f"{emoji} BREAKOUT {tf} SHORT\n\n"
             f"{nome}\n\n"
             f"Preço: {last_close:.6f}"
         )
 
         await send(msg)
-        print(f"[{now()}] BREAKOUT SHORT {sym}")
+        print(f"[{now()}] SHORT {sym} {tf}")
 
-async def alerta_rsi(session, sym, closes, timeframe):
-
-    r = rsi(closes)
-
-    if r >= 90 or r <= 12:
-
-        nome = sym.replace("USDT", "")
-
-        if timeframe == "1H":
-            emoji = "🔵"
-        elif timeframe == "4H":
-            emoji = "🟠"
-        elif timeframe == "1D":
-            emoji = "🟣"
-        else:
-            emoji = "⚪"
-
-        msg = (
-            f"{emoji} RSI EXTREMO {timeframe}\n\n"
-            f"{nome}\n\n"
-            f"Preço: {closes[-1]:.6f}\n"
-            f"RSI: {r:.2f}"
-        )
-
-        await send(msg)
-        print(f"[{now()}] RSI EXTREMO {sym} {timeframe}")
 
 async def monitor_loop():
 
-    await send("SENTINELA MULTI-TIMEFRAME INICIADO")
-    print("SENTINELA RODANDO...")
+    await send("SENTINELA BREAKOUT MULTI-TF INICIADO")
+    print("BOT RODANDO...")
 
     while True:
 
@@ -210,24 +179,21 @@ async def monitor_loop():
 
                 for sym in pool:
 
-                    kl_15m = await fetch_klines(s, sym, TF_15M)
-                    if kl_15m:
-                        await alerta_breakout_15m(s, sym, kl_15m)
+                    kl = await fetch_klines(s, sym, TF_15M)
+                    if kl:
+                        await alerta_breakout(s, sym, kl, "15M", "🟢")
 
-                    kl_1h = await fetch_klines(s, sym, TF_1H)
-                    if kl_1h:
-                        closes = [float(k[4]) for k in kl_1h]
-                        await alerta_rsi(s, sym, closes, "1H")
+                    kl = await fetch_klines(s, sym, TF_1H)
+                    if kl:
+                        await alerta_breakout(s, sym, kl, "1H", "🔵")
 
-                    kl_4h = await fetch_klines(s, sym, TF_4H)
-                    if kl_4h:
-                        closes = [float(k[4]) for k in kl_4h]
-                        await alerta_rsi(s, sym, closes, "4H")
+                    kl = await fetch_klines(s, sym, TF_4H)
+                    if kl:
+                        await alerta_breakout(s, sym, kl, "4H", "🟠")
 
-                    kl_1d = await fetch_klines(s, sym, TF_1D)
-                    if kl_1d:
-                        closes = [float(k[4]) for k in kl_1d]
-                        await alerta_rsi(s, sym, closes, "1D")
+                    kl = await fetch_klines(s, sym, TF_1D)
+                    if kl:
+                        await alerta_breakout(s, sym, kl, "1D", "🟣")
 
                 await asyncio.sleep(SCAN_INTERVAL)
 
@@ -235,6 +201,7 @@ async def monitor_loop():
 
             print(f"[{now()}] ERRO LOOP: {e}")
             await asyncio.sleep(5)
+
 
 def start_bot():
     asyncio.run(monitor_loop())
