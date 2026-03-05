@@ -8,9 +8,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 2_000_000
+MIN_QV_USDT = 1_000_000
 
-# timeframes
 TF_15M = "15m"
 TF_1H = "1h"
 TF_4H = "4h"
@@ -57,9 +56,6 @@ async def fetch_klines(session, sym, interval, limit=50):
         {"symbol": sym, "interval": interval, "limit": limit}
     )
 
-# =========================
-# FILTRO DE MOEDAS
-# =========================
 def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper()
 
@@ -85,9 +81,6 @@ def par_eh_valido(sym):
 
     return True
 
-# =========================
-# RSI
-# =========================
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50
@@ -98,9 +91,23 @@ def rsi(values, period=14):
     return 100 - (100 / (1 + ag / al))
 
 # =========================
-# ALERTA ROMPIMENTO 15M
+# CONTROLE DE CANDLE
 # =========================
+
+_last_candle_15m = {}
+
+# =========================
+# BREAKOUT 15M
+# =========================
+
 async def alerta_breakout_15m(session, sym, klines):
+
+    candle_time = klines[-1][0]
+
+    if _last_candle_15m.get(sym) == candle_time:
+        return
+
+    _last_candle_15m[sym] = candle_time
 
     closes = [float(k[4]) for k in klines]
     highs  = [float(k[2]) for k in klines]
@@ -152,53 +159,41 @@ async def alerta_rsi(session, sym, closes, timeframe):
 
     r = rsi(closes)
 
-    if r >= 90:
+    if r >= 90 or r <= 12:
 
         nome = sym.replace("USDT", "")
 
         msg = (
-            f"🔴 RSI EXTREMO {timeframe}\n\n"
+            f"RSI EXTREMO {timeframe}\n\n"
             f"{nome}\n\n"
             f"Preço: {closes[-1]:.6f}\n"
             f"RSI: {r:.2f}"
         )
 
         await send(msg)
-        print(f"[{now()}] RSI ALTO {sym} {timeframe}")
-
-    if r <= 12:
-
-        nome = sym.replace("USDT", "")
-
-        msg = (
-            f"🟢 RSI EXTREMO {timeframe}\n\n"
-            f"{nome}\n\n"
-            f"Preço: {closes[-1]:.6f}\n"
-            f"RSI: {r:.2f}"
-        )
-
-        await send(msg)
-        print(f"[{now()}] RSI BAIXO {sym} {timeframe}")
-
-# =========================
-# LOOP PRINCIPAL
-# =========================
+        print(f"[{now()}] RSI EXTREMO {sym} {timeframe}")
 
 async def monitor_loop():
-    await send("🟢 SENTINELA MULTI-TIMEFRAME INICIADO")
+
+    await send("SENTINELA MULTI-TIMEFRAME INICIADO")
     print("SENTINELA RODANDO...")
 
     while True:
+
         try:
+
             async with aiohttp.ClientSession() as s:
 
                 data24 = await fetch_24hr(s)
+
                 if not data24:
                     await asyncio.sleep(5)
                     continue
 
                 pool = []
+
                 for x in data24:
+
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
 
@@ -218,24 +213,20 @@ async def monitor_loop():
 
                 for sym in pool:
 
-                    # ===== 15M =====
                     kl_15m = await fetch_klines(s, sym, TF_15M)
                     if kl_15m:
                         await alerta_breakout_15m(s, sym, kl_15m)
 
-                    # ===== 1H =====
                     kl_1h = await fetch_klines(s, sym, TF_1H)
                     if kl_1h:
                         closes = [float(k[4]) for k in kl_1h]
                         await alerta_rsi(s, sym, closes, "1H")
 
-                    # ===== 4H =====
                     kl_4h = await fetch_klines(s, sym, TF_4H)
                     if kl_4h:
                         closes = [float(k[4]) for k in kl_4h]
                         await alerta_rsi(s, sym, closes, "4H")
 
-                    # ===== 1D =====
                     kl_1d = await fetch_klines(s, sym, TF_1D)
                     if kl_1d:
                         closes = [float(k[4]) for k in kl_1d]
@@ -244,6 +235,7 @@ async def monitor_loop():
                 await asyncio.sleep(SCAN_INTERVAL)
 
         except Exception as e:
+
             print(f"[{now()}] ERRO LOOP: {e}")
             await asyncio.sleep(5)
 
