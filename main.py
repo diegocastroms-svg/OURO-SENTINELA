@@ -8,7 +8,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 1_000_000
+MIN_QV_USDT = 2_000_000
 
 TF_15M = "15m"
 TF_1H = "1h"
@@ -90,15 +90,7 @@ def rsi(values, period=14):
     al = sum(losses[-period:]) / period or 1e-9
     return 100 - (100 / (1 + ag / al))
 
-# =========================
-# CONTROLE DE CANDLE
-# =========================
-
 _last_candle_15m = {}
-
-# =========================
-# BREAKOUT 15M
-# =========================
 
 async def alerta_breakout_15m(session, sym, klines):
 
@@ -151,10 +143,6 @@ async def alerta_breakout_15m(session, sym, klines):
         await send(msg)
         print(f"[{now()}] BREAKOUT SHORT {sym}")
 
-# =========================
-# ALERTA RSI
-# =========================
-
 async def alerta_rsi(session, sym, closes, timeframe):
 
     r = rsi(closes)
@@ -163,8 +151,17 @@ async def alerta_rsi(session, sym, closes, timeframe):
 
         nome = sym.replace("USDT", "")
 
+        if timeframe == "1H":
+            emoji = "🔵"
+        elif timeframe == "4H":
+            emoji = "🟠"
+        elif timeframe == "1D":
+            emoji = "🟣"
+        else:
+            emoji = "⚪"
+
         msg = (
-            f"RSI EXTREMO {timeframe}\n\n"
+            f"{emoji} RSI EXTREMO {timeframe}\n\n"
             f"{nome}\n\n"
             f"Preço: {closes[-1]:.6f}\n"
             f"RSI: {r:.2f}"
