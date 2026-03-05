@@ -11,14 +11,10 @@ SCAN_INTERVAL = 30
 MIN_QV_USDT = 2_000_000
 
 # timeframes
+TF_15M = "15m"
 TF_1H = "1h"
 TF_4H = "4h"
 TF_1D = "1d"
-
-# cooldowns
-COOLDOWN_1H = 900       # 15 min
-COOLDOWN_4H = 7200      # 2 horas
-COOLDOWN_1D = 43200     # 12 horas
 
 app = Flask(__name__)
 @app.route("/")
@@ -102,96 +98,87 @@ def rsi(values, period=14):
     return 100 - (100 / (1 + ag / al))
 
 # =========================
-# ALERTAS
+# ALERTA ROMPIMENTO 15M
+# =========================
+async def alerta_breakout_15m(session, sym, klines):
+
+    closes = [float(k[4]) for k in klines]
+    highs  = [float(k[2]) for k in klines]
+    lows   = [float(k[3]) for k in klines]
+    volumes = [float(k[5]) for k in klines]
+
+    last_close = closes[-1]
+
+    high5 = max(highs[-6:-1])
+    low5 = min(lows[-6:-1])
+
+    vol_media = sum(volumes[-10:-1]) / 9
+    vol_atual = volumes[-1]
+
+    lateral_range = (high5 - low5) / last_close * 100
+
+    if lateral_range > 1.2:
+        return
+
+    nome = sym.replace("USDT", "")
+
+    if vol_atual > vol_media and last_close > high5:
+
+        msg = (
+            f"🚀 BREAKOUT 15M LONG\n\n"
+            f"{nome}\n\n"
+            f"Preço: {last_close:.6f}"
+        )
+
+        await send(msg)
+        print(f"[{now()}] BREAKOUT LONG {sym}")
+
+    if vol_atual > vol_media and last_close < low5:
+
+        msg = (
+            f"🔻 BREAKOUT 15M SHORT\n\n"
+            f"{nome}\n\n"
+            f"Preço: {last_close:.6f}"
+        )
+
+        await send(msg)
+        print(f"[{now()}] BREAKOUT SHORT {sym}")
+
+# =========================
+# ALERTA RSI
 # =========================
 
-_last_alert_1h = {}
-_last_alert_4h = {}
-_last_alert_1d = {}
-
-# ---- ALERTA 1H (RSI < 35)
-async def alerta_rsi_1h(session, sym, closes, highs, lows):
-    return
+async def alerta_rsi(session, sym, closes, timeframe):
 
     r = rsi(closes)
-    if r >= 35:
-        return
 
-    mb = sum(closes[-20:]) / 20
-    sd = (sum((c - mb)**2 for c in closes[-20:]) / 20)**0.5
-    dn = mb - 2*sd
-    if closes[-1] > dn:
-        return
+    if r >= 90:
 
-    nowt = time.time()
-    if nowt - _last_alert_1h.get(sym, 0) < COOLDOWN_1H:
-        return
-    _last_alert_1h[sym] = nowt
+        nome = sym.replace("USDT", "")
 
-    nome = sym.replace("USDT", "")
-    msg = (
-        f"🔵 RSI 1H < 35\n\n"
-        f"{nome}\n\n"
-        f"Preço: {closes[-1]:.6f}\n"
-        f"RSI: {r:.2f}"
-    )
-    await send(msg)
-    print(f"[{now()}] ALERTA 1H: {sym}")
+        msg = (
+            f"🔴 RSI EXTREMO {timeframe}\n\n"
+            f"{nome}\n\n"
+            f"Preço: {closes[-1]:.6f}\n"
+            f"RSI: {r:.2f}"
+        )
 
-# ---- ALERTA 4H (RSI < 38)
-async def alerta_rsi_4h(session, sym, closes, highs, lows):
-    r = rsi(closes)
-    if r >= 38:
-        return
+        await send(msg)
+        print(f"[{now()}] RSI ALTO {sym} {timeframe}")
 
-    mb = sum(closes[-20:]) / 20
-    sd = (sum((c - mb)**2 for c in closes[-20:]) / 20)**0.5
-    dn = mb - 2*sd
-    if closes[-1] > dn:
-        return
+    if r <= 12:
 
-    nowt = time.time()
-    if nowt - _last_alert_4h.get(sym, 0) < COOLDOWN_4H:
-        return
-    _last_alert_4h[sym] = nowt
+        nome = sym.replace("USDT", "")
 
-    nome = sym.replace("USDT", "")
-    msg = (
-        f"🟠 RSI 4H < 38\n\n"
-        f"{nome}\n\n"
-        f"Preço: {closes[-1]:.6f}\n"
-        f"RSI: {r:.2f}"
-    )
-    await send(msg)
-    print(f"[{now()}] ALERTA 4H: {sym}")
+        msg = (
+            f"🟢 RSI EXTREMO {timeframe}\n\n"
+            f"{nome}\n\n"
+            f"Preço: {closes[-1]:.6f}\n"
+            f"RSI: {r:.2f}"
+        )
 
-# ---- ALERTA 1D (RSI < 38)
-async def alerta_rsi_1d(session, sym, closes, highs, lows):
-    r = rsi(closes)
-    if r >= 38:
-        return
-
-    mb = sum(closes[-20:]) / 20
-    sd = (sum((c - mb)**2 for c in closes[-20:]) / 20)**0.5
-    dn = mb - 2*sd
-    if closes[-1] > dn:
-        return
-
-    nowt = time.time()
-    if nowt - _last_alert_1d.get(sym, 0) < COOLDOWN_1D:
-        return
-    _last_alert_1d[sym] = nowt
-
-    nome = sym.replace("USDT", "")
-    msg = (
-        f"🟣 RSI 1D < 38\n\n"
-        f"{nome}\n\n"
-        f"Preço: {closes[-1]:.6f}\n"
-        f"RSI (1D): {r:.2f}\n"
-        "Banda inferior + RSI diário em sobrevenda."
-    )
-    await send(msg)
-    print(f"[{now()}] ALERTA 1D: {sym}")
+        await send(msg)
+        print(f"[{now()}] RSI BAIXO {sym} {timeframe}")
 
 # =========================
 # LOOP PRINCIPAL
@@ -214,12 +201,16 @@ async def monitor_loop():
                 for x in data24:
                     sym = x.get("symbol")
                     vol = x.get("quoteVolume")
+
                     if not sym or not vol:
                         continue
+
                     if not sym.endswith("USDT"):
                         continue
+
                     if not par_eh_valido(sym):
                         continue
+
                     if float(vol) >= MIN_QV_USDT:
                         pool.append(sym)
 
@@ -227,29 +218,28 @@ async def monitor_loop():
 
                 for sym in pool:
 
-                    # ==== 1H ====
+                    # ===== 15M =====
+                    kl_15m = await fetch_klines(s, sym, TF_15M)
+                    if kl_15m:
+                        await alerta_breakout_15m(s, sym, kl_15m)
+
+                    # ===== 1H =====
                     kl_1h = await fetch_klines(s, sym, TF_1H)
                     if kl_1h:
                         closes = [float(k[4]) for k in kl_1h]
-                        highs  = [float(k[2]) for k in kl_1h]
-                        lows   = [float(k[3]) for k in kl_1h]
-                        await alerta_rsi_1h(s, sym, closes, highs, lows)
+                        await alerta_rsi(s, sym, closes, "1H")
 
-                    # ==== 4H ====
+                    # ===== 4H =====
                     kl_4h = await fetch_klines(s, sym, TF_4H)
                     if kl_4h:
                         closes = [float(k[4]) for k in kl_4h]
-                        highs  = [float(k[2]) for k in kl_4h]
-                        lows   = [float(k[3]) for k in kl_4h]
-                        await alerta_rsi_4h(s, sym, closes, highs, lows)
+                        await alerta_rsi(s, sym, closes, "4H")
 
-                    # ==== 1D ====
+                    # ===== 1D =====
                     kl_1d = await fetch_klines(s, sym, TF_1D)
                     if kl_1d:
                         closes = [float(k[4]) for k in kl_1d]
-                        highs  = [float(k[2]) for k in kl_1d]
-                        lows   = [float(k[3]) for k in kl_1d]
-                        await alerta_rsi_1d(s, sym, closes, highs, lows)
+                        await alerta_rsi(s, sym, closes, "1D")
 
                 await asyncio.sleep(SCAN_INTERVAL)
 
