@@ -8,7 +8,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 2_000_000
+MIN_QV_USDT = 10_000_000
 
 TF_15M = "15m"
 TF_1H = "1h"
