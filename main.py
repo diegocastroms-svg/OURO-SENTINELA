@@ -111,8 +111,22 @@ async def alerta_breakout(session, sym, klines, tf, emoji):
 
     lateral_range = (high5 - low5) / last_close * 100
 
-    if lateral_range > 1.2:
+    # ===== FILTRO ADAPTATIVO ATR =====
+    trs = []
+    for i in range(1, len(highs)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i-1]),
+            abs(lows[i] - closes[i-1])
+        )
+        trs.append(tr)
+
+    atr = sum(trs[-14:]) / 14
+    atr_percent = (atr / last_close) * 100
+
+    if lateral_range > atr_percent * 0.8:
         return
+    # =================================
 
     nome = sym.replace("USDT", "")
 
