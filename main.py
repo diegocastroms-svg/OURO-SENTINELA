@@ -88,13 +88,7 @@ _last_candle = {}
 async def alerta_breakout(session, sym, klines, tf, emoji):
 
     candle_time = klines[-1][0]
-
     key = sym + tf
-
-    if _last_candle.get(key) == candle_time:
-        return
-
-    _last_candle[key] = candle_time
 
     closes = [float(k[4]) for k in klines]
     highs  = [float(k[2]) for k in klines]
@@ -111,7 +105,7 @@ async def alerta_breakout(session, sym, klines, tf, emoji):
 
     lateral_range = (high5 - low5) / last_close * 100
 
-    # ===== FILTRO ADAPTATIVO ATR =====
+    # ATR adaptativo
     trs = []
     for i in range(1, len(highs)):
         tr = max(
@@ -126,11 +120,15 @@ async def alerta_breakout(session, sym, klines, tf, emoji):
 
     if lateral_range > atr_percent * 0.8:
         return
-    # =================================
 
     nome = sym.replace("USDT", "")
 
     if vol_atual > vol_media and last_close > high5:
+
+        if _last_candle.get(key) == candle_time:
+            return
+
+        _last_candle[key] = candle_time
 
         msg = (
             f"{emoji} BREAKOUT {tf} LONG\n\n"
@@ -142,6 +140,11 @@ async def alerta_breakout(session, sym, klines, tf, emoji):
         print(f"[{now()}] LONG {sym} {tf}")
 
     if vol_atual > vol_media and last_close < low5:
+
+        if _last_candle.get(key) == candle_time:
+            return
+
+        _last_candle[key] = candle_time
 
         msg = (
             f"{emoji} BREAKOUT {tf} SHORT\n\n"
