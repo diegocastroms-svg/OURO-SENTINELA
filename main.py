@@ -24,7 +24,7 @@ def health():
     return "OK", 200
 
 def now():
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 async def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -62,7 +62,6 @@ def par_eh_valido(sym):
 _last_processed = {}
 
 async def analisar_tendencia(sym, klines, timeframe):
-    # Evita alarmes repetidos na mesma vela
     key = f"{sym}_{timeframe}"
     candle_time = klines[-1][0]
     if _last_processed.get(key) == candle_time:
@@ -78,36 +77,36 @@ async def analisar_tendencia(sym, klines, timeframe):
     last_close = closes[-1]
     
     nome = sym.replace("USDT", "")
-    emoji_tf = "⏱️ 15M" if timeframe == "15m" else "⏳ 1H"
+    data_hora_atual = now()
 
-    # LÓGICA DE LONG: Médias alinhadas + Volume + Preço acima das médias
     if last_close > ma9 > ma21 and vol_atual > (vol_media * 1.5):
         _last_processed[key] = candle_time
         msg = (
             f"🚀 **{nome} LONG ({timeframe})**\n\n"
+            f"📅 Data/Hora: {data_hora_atual}\n"
             f"✅ Tendência de Alta Confirmada\n"
             f"📊 Preço: {last_close:.6f}\n"
             f"🔥 Volume: {vol_atual/vol_media:.1f}x acima da média\n"
             f"📈 Alinhamento: MA9 > MA21"
         )
         await send(msg)
-        print(f"[{now()}] LONG {sym} {timeframe}")
+        print(f"[{data_hora_atual}] LONG {sym} {timeframe}")
 
-    # LÓGICA DE SHORT: Médias alinhadas p/ baixo + Volume + Preço abaixo das médias
     elif last_close < ma9 < ma21 and vol_atual > (vol_media * 1.5):
         _last_processed[key] = candle_time
         msg = (
             f"🔻 **{nome} SHORT ({timeframe})**\n\n"
+            f"📅 Data/Hora: {data_hora_atual}\n"
             f"⚠️ Tendência de Baixa Confirmada\n"
             f"📊 Preço: {last_close:.6f}\n"
             f"🔥 Volume: {vol_atual/vol_media:.1f}x acima da média\n"
             f"📉 Alinhamento: MA9 < MA21"
         )
         await send(msg)
-        print(f"[{now()}] SHORT {sym} {timeframe}")
+        print(f"[{data_hora_atual}] SHORT {sym} {timeframe}")
 
 async def monitor_loop():
-    await send("SENTINELA DE TENDÊNCIA E VOLUME ATIVO")
+    await send(f"SENTINELA ATIVO EM: {now()}")
     while True:
         try:
             async with aiohttp.ClientSession() as s:
@@ -123,15 +122,13 @@ async def monitor_loop():
                 print(f"[{now()}] Analisando {len(pool)} pares...")
 
                 for sym in pool:
-                    # Analisa 15 minutos
                     kl_15 = await get_json(s, f"{BINANCE}/api/v3/klines", {"symbol": sym, "interval": "15m", "limit": 40})
                     if kl_15: await analisar_tendencia(sym, kl_15, "15m")
 
-                    # Analisa 1 hora
                     kl_1h = await get_json(s, f"{BINANCE}/api/v3/klines", {"symbol": sym, "interval": "1h", "limit": 40})
                     if kl_1h: await analisar_tendencia(sym, kl_1h, "1h")
                     
-                    await asyncio.sleep(0.1) # Pequeno delay para evitar ban de IP
+                    await asyncio.sleep(0.1)
 
             await asyncio.sleep(SCAN_INTERVAL)
         except Exception as e:
