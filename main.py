@@ -56,7 +56,7 @@ def par_eh_valido(sym):
     if sym.endswith(("UPUSDT","DOWNUSDT","BULLUSDT","BEARUSDT")): return False
     return True
 
-# DICIONÁRIO PARA GUARDAR O ÚLTIMO ESTADO (LONG, SHORT ou NONE)
+# DICIONÁRIO PARA GUARDAR O ÚLTIMO ESTADO (TRAVA)
 _last_signal_state = {}
 
 async def analisar_tendencia(sym, klines, timeframe):
@@ -74,20 +74,20 @@ async def analisar_tendencia(sym, klines, timeframe):
     nome = sym.replace("USDT", "")
     data_hora_atual = now()
 
-    # IDENTIFICA O ESTADO ATUAL COM BASE NAS REGRAS
+    # IDENTIFICA O ESTADO ATUAL COM VOLUME 1.5x
     current_state = None
     if last_close > ma9 > ma21 and vol_atual > (vol_media * 1.5):
         current_state = "LONG"
     elif last_close < ma9 < ma21 and vol_atual > (vol_media * 1.5):
         current_state = "SHORT"
 
-    # SÓ ALERTA SE O ESTADO MUDOU (Ex: de None para LONG, ou de SHORT para LONG)
+    # TRAVA DE REPETIÇÃO: SÓ ALERTA SE O ESTADO MUDOU
     if current_state and current_state != _last_signal_state.get(key):
-        _last_signal_state[key] = current_state # TRAVA O ESTADO
+        _last_signal_state[key] = current_state
         
         if current_state == "LONG":
             msg = (
-                f"🚀 **{nome} LONG ({timeframe})**\n\n"
+                f"🚀 {nome} LONG ({timeframe})\n\n"
                 f"📅 Hora: {data_hora_atual}\n"
                 f"✅ Início de Tendência Detectado\n"
                 f"📊 Preço: {last_close:.6f}\n"
@@ -95,7 +95,7 @@ async def analisar_tendencia(sym, klines, timeframe):
             )
         else:
             msg = (
-                f"🔻 **{nome} SHORT ({timeframe})**\n\n"
+                f"🔻 {nome} SHORT ({timeframe})\n\n"
                 f"📅 Hora: {data_hora_atual}\n"
                 f"⚠️ Início de Queda Detectado\n"
                 f"📊 Preço: {last_close:.6f}\n"
@@ -105,8 +105,7 @@ async def analisar_tendencia(sym, klines, timeframe):
         await send(msg)
         print(f"[{data_hora_atual}] NOVO GATILHO: {current_state} em {sym} {timeframe}")
     
-    # SE O SINAL SUMIR (PREÇO VOLTAR PARA DENTRO DAS MÉDIAS OU VOLUME CAIR), 
-    # LIMPA O ESTADO PARA PERMITIR UM NOVO ALERTA FUTURO
+    # LIMPA O ESTADO SE A CONDIÇÃO TÉCNICA ACABAR (PERMITE NOVO ALERTA FUTURO)
     elif current_state is None:
         _last_signal_state[key] = None
 
