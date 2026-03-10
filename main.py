@@ -56,7 +56,7 @@ def par_eh_valido(sym):
     if sym.endswith(("UPUSDT","DOWNUSDT","BULLUSDT","BEARUSDT")): return False
     return True
 
-# DICIONÁRIO PARA GUARDAR O ÚLTIMO ESTADO (TRAVA)
+# DICIONÁRIO PARA GUARDAR A TRAVA DO SINAL
 _last_signal_state = {}
 
 async def analisar_tendencia(sym, klines, timeframe):
@@ -74,18 +74,13 @@ async def analisar_tendencia(sym, klines, timeframe):
     nome = sym.replace("USDT", "")
     data_hora_atual = now()
 
-    # IDENTIFICA O ESTADO ATUAL COM VOLUME 1.5x
-    current_state = None
-    if last_close > ma9 > ma21 and vol_atual > (vol_media * 1.5):
-        current_state = "LONG"
-    elif last_close < ma9 < ma21 and vol_atual > (vol_media * 1.5):
-        current_state = "SHORT"
+    # ESTADO ANTERIOR SALVO
+    last_state = _last_signal_state.get(key)
 
-    # TRAVA DE REPETIÇÃO: SÓ ALERTA SE O ESTADO MUDOU
-    if current_state and current_state != _last_signal_state.get(key):
-        _last_signal_state[key] = current_state
-        
-        if current_state == "LONG":
+    # 1. LOGICA DE DISPARO (Gatilho inicial)
+    if last_close > ma9 > ma21 and vol_atual > (vol_media * 1.5):
+        if last_state != "LONG":
+            _last_signal_state[key] = "LONG"
             msg = (
                 f"🚀 {nome} LONG ({timeframe})\n\n"
                 f"📅 Hora: {data_hora_atual}\n"
@@ -93,7 +88,12 @@ async def analisar_tendencia(sym, klines, timeframe):
                 f"📊 Preço: {last_close:.6f}\n"
                 f"🔥 Volume: {vol_atual/vol_media:.1f}x"
             )
-        else:
+            await send(msg)
+            print(f"[{data_hora_atual}] NOVO GATILHO LONG: {sym}")
+
+    elif last_close < ma9 < ma21 and vol_atual > (vol_media * 1.5):
+        if last_state != "SHORT":
+            _last_signal_state[key] = "SHORT"
             msg = (
                 f"🔻 {nome} SHORT ({timeframe})\n\n"
                 f"📅 Hora: {data_hora_atual}\n"
@@ -101,13 +101,19 @@ async def analisar_tendencia(sym, klines, timeframe):
                 f"📊 Preço: {last_close:.6f}\n"
                 f"🔥 Volume: {vol_atual/vol_media:.1f}x"
             )
-        
-        await send(msg)
-        print(f"[{data_hora_atual}] NOVO GATILHO: {current_state} em {sym} {timeframe}")
-    
-    # LIMPA O ESTADO SE A CONDIÇÃO TÉCNICA ACABAR (PERMITE NOVO ALERTA FUTURO)
-    elif current_state is None:
+            await send(msg)
+            print(f"[{data_hora_atual}] NOVO GATILHO SHORT: {sym}")
+
+    # 2. LOGICA DE QUEBRA DO GATILHO (Reset da trava)
+    # Se estava em LONG, mas o preço caiu abaixo da MA9, limpa a trava para permitir novo alerta futuro
+    if last_state == "LONG" and last_close < ma9:
         _last_signal_state[key] = None
+        print(f"[{data_hora_atual}] RESET LONG (Preço abaixo da MA9): {sym}")
+        
+    # Se estava em SHORT, mas o preço subiu acima da MA9, limpa a trava para permitir novo alerta futuro
+    elif last_state == "SHORT" and last_close > ma9:
+        _last_signal_state[key] = None
+        print(f"[{data_hora_atual}] RESET SHORT (Preço acima da MA9): {sym}")
 
 async def monitor_loop():
     await send(f"SENTINELA ATIVO EM: {now()}")
