@@ -1,5 +1,5 @@
 import os, asyncio, aiohttp, time, threading
-from datetime import datetime, timedelta # Importação adicionada para o ajuste de hora
+from datetime import datetime, timedelta
 from flask import Flask
 
 BINANCE = "https://api.binance.com"
@@ -19,12 +19,7 @@ app = Flask(__name__)
 def home():
     return "SENTINELA TREND-VOLUME ATIVO", 200
 
-@app.route("/health")
-def health():
-    return "OK", 200
-
 def now():
-    # Ajuste fixo de -3 horas para horário de Brasília
     agora_brasilia = datetime.now() - timedelta(hours=3)
     return agora_brasilia.strftime("%d/%m/%Y %H:%M:%S")
 
@@ -61,13 +56,11 @@ def par_eh_valido(sym):
     if sym.endswith(("UPUSDT","DOWNUSDT","BULLUSDT","BEARUSDT")): return False
     return True
 
-_last_processed = {}
+# DICIONÁRIO PARA GUARDAR O ÚLTIMO ESTADO (LONG, SHORT ou NONE)
+_last_signal_state = {}
 
 async def analisar_tendencia(sym, klines, timeframe):
     key = f"{sym}_{timeframe}"
-    candle_time = klines[-1][0]
-    if _last_processed.get(key) == candle_time:
-        return
     
     closes = [float(k[4]) for k in klines]
     volumes = [float(k[5]) for k in klines]
@@ -81,31 +74,41 @@ async def analisar_tendencia(sym, klines, timeframe):
     nome = sym.replace("USDT", "")
     data_hora_atual = now()
 
+    # IDENTIFICA O ESTADO ATUAL COM BASE NAS REGRAS
+    current_state = None
     if last_close > ma9 > ma21 and vol_atual > (vol_media * 1.5):
-        _last_processed[key] = candle_time
-        msg = (
-            f"🚀 **{nome} LONG ({timeframe})**\n\n"
-            f"📅 Data/Hora: {data_hora_atual}\n"
-            f"✅ Tendência de Alta Confirmada\n"
-            f"📊 Preço: {last_close:.6f}\n"
-            f"🔥 Volume: {vol_atual/vol_media:.1f}x acima da média\n"
-            f"📈 Alinhamento: MA9 > MA21"
-        )
-        await send(msg)
-        print(f"[{data_hora_atual}] LONG {sym} {timeframe}")
-
+        current_state = "LONG"
     elif last_close < ma9 < ma21 and vol_atual > (vol_media * 1.5):
-        _last_processed[key] = candle_time
-        msg = (
-            f"🔻 **{nome} SHORT ({timeframe})**\n\n"
-            f"📅 Data/Hora: {data_hora_atual}\n"
-            f"⚠️ Tendência de Baixa Confirmada\n"
-            f"📊 Preço: {last_close:.6f}\n"
-            f"🔥 Volume: {vol_atual/vol_media:.1f}x acima da média\n"
-            f"📉 Alinhamento: MA9 < MA21"
-        )
+        current_state = "SHORT"
+
+    # SÓ ALERTA SE O ESTADO MUDOU (Ex: de None para LONG, ou de SHORT para LONG)
+    if current_state and current_state != _last_signal_state.get(key):
+        _last_signal_state[key] = current_state # TRAVA O ESTADO
+        
+        if current_state == "LONG":
+            msg = (
+                f"🚀 **{nome} LONG ({timeframe})**\n\n"
+                f"📅 Hora: {data_hora_atual}\n"
+                f"✅ Início de Tendência Detectado\n"
+                f"📊 Preço: {last_close:.6f}\n"
+                f"🔥 Volume: {vol_atual/vol_media:.1f}x"
+            )
+        else:
+            msg = (
+                f"🔻 **{nome} SHORT ({timeframe})**\n\n"
+                f"📅 Hora: {data_hora_atual}\n"
+                f"⚠️ Início de Queda Detectado\n"
+                f"📊 Preço: {last_close:.6f}\n"
+                f"🔥 Volume: {vol_atual/vol_media:.1f}x"
+            )
+        
         await send(msg)
-        print(f"[{data_hora_atual}] SHORT {sym} {timeframe}")
+        print(f"[{data_hora_atual}] NOVO GATILHO: {current_state} em {sym} {timeframe}")
+    
+    # SE O SINAL SUMIR (PREÇO VOLTAR PARA DENTRO DAS MÉDIAS OU VOLUME CAIR), 
+    # LIMPA O ESTADO PARA PERMITIR UM NOVO ALERTA FUTURO
+    elif current_state is None:
+        _last_signal_state[key] = None
 
 async def monitor_loop():
     await send(f"SENTINELA ATIVO EM: {now()}")
@@ -121,8 +124,6 @@ async def monitor_loop():
                         and par_eh_valido(x["symbol"]) 
                         and float(x.get("quoteVolume", 0)) >= MIN_QV_USDT]
 
-                print(f"[{now()}] Analisando {len(pool)} pares...")
-
                 for sym in pool:
                     kl_15 = await get_json(s, f"{BINANCE}/api/v3/klines", {"symbol": sym, "interval": "15m", "limit": 40})
                     if kl_15: await analisar_tendencia(sym, kl_15, "15m")
@@ -134,7 +135,6 @@ async def monitor_loop():
 
             await asyncio.sleep(SCAN_INTERVAL)
         except Exception as e:
-            print(f"[{now()}] Erro: {e}")
             await asyncio.sleep(10)
 
 def start_bot():
