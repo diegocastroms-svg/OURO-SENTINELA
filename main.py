@@ -11,8 +11,6 @@ SCAN_INTERVAL = 30
 MIN_QV_USDT = 30_000_000
 COOLDOWN = 3600
 
-TF_1M = "1m"
-
 app = Flask(__name__)
 
 @app.route("/")
@@ -48,6 +46,7 @@ def moving_average(values, window):
     return sum(values[-window:]) / window
 
 def par_eh_valido(sym):
+
     base = sym.replace("USDT", "").upper()
 
     invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","BKRW","BVND","IDRT",
@@ -74,9 +73,9 @@ async def analisar_tendencia(sym, klines):
     closes = [float(k[4]) for k in klines]
     volumes = [float(k[5]) for k in klines]
 
-    ma9 = moving_average(closes, 9)
-    ma20 = moving_average(closes, 20)
-    ma200 = moving_average(closes, 200)
+    ma9 = moving_average(closes[:-1], 9)
+    ma20 = moving_average(closes[:-1], 20)
+    ma200 = moving_average(closes[:-1], 200)
 
     vol_atual = volumes[-1]
     vol_prev1 = volumes[-2]
@@ -88,14 +87,14 @@ async def analisar_tendencia(sym, klines):
     nome = sym.replace("USDT","")
     data_hora_atual = now()
 
-    vol_ok = vol_atual > (max(vol_prev1, vol_prev2) * 1.5)
+    vol_ok = vol_atual >= (max(vol_prev1, vol_prev2) * 1.5)
 
     key1 = f"{sym}_MA200"
     key2 = f"{sym}_MA9MA20"
 
     now_ts = time.time()
 
-    # ALERTA CRUZAMENTO PREÇO X MA200
+    # CRUZAMENTO PREÇO X MA200
 
     if vol_ok:
 
@@ -133,21 +132,19 @@ async def analisar_tendencia(sym, klines):
 
                 await send(msg)
 
-    # ALERTA REVERSÃO MA9 x MA20
+    # REVERSÃO MA9 x MA20
 
     if vol_ok:
 
-        prev_ma9 = moving_average(closes[:-1], 9)
-        prev_ma20 = moving_average(closes[:-1], 20)
+        prev_ma9 = moving_average(closes[:-2], 9)
+        prev_ma20 = moving_average(closes[:-2], 20)
 
-        prev2_ma20 = moving_average(closes[:-2], 20)
+        curr_ma9 = moving_average(closes[:-1], 9)
+        curr_ma20 = moving_average(closes[:-1], 20)
 
-        ma20_caindo = prev2_ma20 > prev_ma20
-        ma20_subindo = prev2_ma20 < prev_ma20
+        # LONG
 
-        # REVERSÃO PARA LONG
-
-        if prev_ma9 < prev_ma20 and ma9 > ma20 and ma20_caindo:
+        if prev_ma9 < prev_ma20 and curr_ma9 > curr_ma20 and last_close > curr_ma9:
 
             if now_ts - _last_signal_time.get(key2,0) > COOLDOWN:
 
@@ -157,7 +154,7 @@ async def analisar_tendencia(sym, klines):
                     f"🟢 REVERSÃO LONG\n\n"
                     f"{nome}\n"
                     f"MA9 cruzou MA20\n"
-                    f"Tendência anterior: QUEDA\n"
+                    f"Preço acima MA9\n"
                     f"Preço: {last_close:.6f}\n"
                     f"Volume: 1.5x+\n"
                     f"{data_hora_atual}"
@@ -165,9 +162,9 @@ async def analisar_tendencia(sym, klines):
 
                 await send(msg)
 
-        # REVERSÃO PARA SHORT
+        # SHORT
 
-        elif prev_ma9 > prev_ma20 and ma9 < ma20 and ma20_subindo:
+        elif prev_ma9 > prev_ma20 and curr_ma9 < curr_ma20 and last_close < curr_ma9:
 
             if now_ts - _last_signal_time.get(key2,0) > COOLDOWN:
 
@@ -177,7 +174,7 @@ async def analisar_tendencia(sym, klines):
                     f"🔴 REVERSÃO SHORT\n\n"
                     f"{nome}\n"
                     f"MA9 cruzou MA20\n"
-                    f"Tendência anterior: ALTA\n"
+                    f"Preço abaixo MA9\n"
                     f"Preço: {last_close:.6f}\n"
                     f"Volume: 1.5x+\n"
                     f"{data_hora_atual}"
