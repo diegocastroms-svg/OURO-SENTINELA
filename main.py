@@ -205,19 +205,30 @@ async def monitor_loop():
 
                 pool = [x["symbol"] for x in data24
                         if x.get("symbol","").endswith("USDT")
-                        and par_eh_valido(x["symbol"])
-                        and float(x.get("quoteVolume",0)) >= MIN_QV_USDT]
+                        and par_eh_valido(x["symbol"])]
 
-                for sym in pool:
+                for x in data24:
 
-                    kl_1m = await get_json(
-                        s,
-                        f"{BINANCE}/api/v3/klines",
-                        {"symbol":sym,"interval":"1m","limit":210}
-                    )
+                    sym = x["symbol"]
 
-                    if kl_1m:
-                        await analisar_1m(sym, kl_1m)
+                    if not sym.endswith("USDT"):
+                        continue
+
+                    if not par_eh_valido(sym):
+                        continue
+
+                    vol24 = float(x.get("quoteVolume",0))
+
+                    if 5_000_000 <= vol24 <= 100_000_000:
+
+                        kl_1m = await get_json(
+                            s,
+                            f"{BINANCE}/api/v3/klines",
+                            {"symbol":sym,"interval":"1m","limit":210}
+                        )
+
+                        if kl_1m:
+                            await analisar_1m(sym, kl_1m)
 
                     kl_1d = await get_json(
                         s,
