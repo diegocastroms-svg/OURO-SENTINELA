@@ -9,7 +9,9 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
 MIN_QV_USDT = 30_000_000
-COOLDOWN = 3600
+
+COOLDOWN_1M = 3600
+COOLDOWN_1D = 86400
 
 app = Flask(__name__)
 
@@ -68,48 +70,43 @@ def par_eh_valido(sym):
 
 _last_signal_time = {}
 
-async def analisar_tendencia(sym, klines):
+async def analisar_1m(sym, klines):
 
     closes = [float(k[4]) for k in klines]
     volumes = [float(k[5]) for k in klines]
 
-    ma9 = moving_average(closes[:-1], 9)
-    ma20 = moving_average(closes[:-1], 20)
     ma200 = moving_average(closes[:-1], 200)
+
+    last_close = closes[-1]
+    prev_close = closes[-2]
 
     vol_atual = volumes[-1]
     vol_prev1 = volumes[-2]
     vol_prev2 = volumes[-3]
 
-    last_close = closes[-1]
-    prev_close = closes[-2]
+    vol_ok = vol_atual >= (max(vol_prev1, vol_prev2) * 1.5)
 
     nome = sym.replace("USDT","")
     data_hora_atual = now()
 
-    vol_ok = vol_atual >= (max(vol_prev1, vol_prev2) * 1.5)
-
-    key1 = f"{sym}_MA200"
-    key2 = f"{sym}_MA9MA20"
+    key = f"{sym}_1M_MA200"
 
     now_ts = time.time()
-
-    # CRUZAMENTO PREÇO X MA200
 
     if vol_ok:
 
         if prev_close < ma200 and last_close > ma200:
 
-            if now_ts - _last_signal_time.get(key1,0) > COOLDOWN:
+            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_1M:
 
-                _last_signal_time[key1] = now_ts
+                _last_signal_time[key] = now_ts
 
                 msg = (
-                    f"🚀 LONG MA200\n\n"
+                    f"⏱ LONG 1M\n\n"
                     f"{nome}\n"
-                    f"Cruzou MA200\n"
+                    f"Preço cruzou MA200\n"
                     f"Preço: {last_close:.6f}\n"
-                    f"Volume: 1.5x+\n"
+                    f"Volume 1.5x+\n"
                     f"{data_hora_atual}"
                 )
 
@@ -117,66 +114,74 @@ async def analisar_tendencia(sym, klines):
 
         elif prev_close > ma200 and last_close < ma200:
 
-            if now_ts - _last_signal_time.get(key1,0) > COOLDOWN:
+            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_1M:
 
-                _last_signal_time[key1] = now_ts
+                _last_signal_time[key] = now_ts
 
                 msg = (
-                    f"🔻 SHORT MA200\n\n"
+                    f"⏱ SHORT 1M\n\n"
                     f"{nome}\n"
-                    f"Cruzou MA200\n"
+                    f"Preço cruzou MA200\n"
                     f"Preço: {last_close:.6f}\n"
-                    f"Volume: 1.5x+\n"
+                    f"Volume 1.5x+\n"
                     f"{data_hora_atual}"
                 )
 
                 await send(msg)
 
-    # REVERSÃO MA9 x MA20
+async def analisar_1d(sym, klines):
+
+    closes = [float(k[4]) for k in klines]
+    volumes = [float(k[5]) for k in klines]
+
+    ma50 = moving_average(closes[:-1],50)
+
+    last_close = closes[-1]
+    prev_close = closes[-2]
+
+    vol_atual = volumes[-1]
+    vol_prev = volumes[-2]
+
+    vol_ok = vol_atual >= vol_prev * 1.5
+
+    nome = sym.replace("USDT","")
+    data_hora_atual = now()
+
+    key = f"{sym}_1D_MA50"
+
+    now_ts = time.time()
 
     if vol_ok:
 
-        prev_ma9 = moving_average(closes[:-2], 9)
-        prev_ma20 = moving_average(closes[:-2], 20)
+        if prev_close < ma50 and last_close > ma50:
 
-        curr_ma9 = moving_average(closes[:-1], 9)
-        curr_ma20 = moving_average(closes[:-1], 20)
+            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_1D:
 
-        # LONG
-
-        if prev_ma9 < prev_ma20 and curr_ma9 > curr_ma20 and last_close > curr_ma9:
-
-            if now_ts - _last_signal_time.get(key2,0) > COOLDOWN:
-
-                _last_signal_time[key2] = now_ts
+                _last_signal_time[key] = now_ts
 
                 msg = (
-                    f"🟢 REVERSÃO LONG\n\n"
+                    f"📅 LONG 1D\n\n"
                     f"{nome}\n"
-                    f"MA9 cruzou MA20\n"
-                    f"Preço acima MA9\n"
+                    f"Preço cruzou MA50\n"
                     f"Preço: {last_close:.6f}\n"
-                    f"Volume: 1.5x+\n"
+                    f"Volume 1.5x+\n"
                     f"{data_hora_atual}"
                 )
 
                 await send(msg)
 
-        # SHORT
+        elif prev_close > ma50 and last_close < ma50:
 
-        elif prev_ma9 > prev_ma20 and curr_ma9 < curr_ma20 and last_close < curr_ma9:
+            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_1D:
 
-            if now_ts - _last_signal_time.get(key2,0) > COOLDOWN:
-
-                _last_signal_time[key2] = now_ts
+                _last_signal_time[key] = now_ts
 
                 msg = (
-                    f"🔴 REVERSÃO SHORT\n\n"
+                    f"📅 SHORT 1D\n\n"
                     f"{nome}\n"
-                    f"MA9 cruzou MA20\n"
-                    f"Preço abaixo MA9\n"
+                    f"Preço cruzou MA50\n"
                     f"Preço: {last_close:.6f}\n"
-                    f"Volume: 1.5x+\n"
+                    f"Volume 1.5x+\n"
                     f"{data_hora_atual}"
                 )
 
@@ -212,7 +217,16 @@ async def monitor_loop():
                     )
 
                     if kl_1m:
-                        await analisar_tendencia(sym, kl_1m)
+                        await analisar_1m(sym, kl_1m)
+
+                    kl_1d = await get_json(
+                        s,
+                        f"{BINANCE}/api/v3/klines",
+                        {"symbol":sym,"interval":"1d","limit":100}
+                    )
+
+                    if kl_1d:
+                        await analisar_1d(sym, kl_1d)
 
                     await asyncio.sleep(0.05)
 
