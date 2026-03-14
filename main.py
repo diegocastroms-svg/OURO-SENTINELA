@@ -8,9 +8,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 30_000_000
+MIN_QV_USDT = 10_000_000
 
-COOLDOWN_1M = 3600
+COOLDOWN_15M = 3600
 COOLDOWN_1D = 86400
 
 app = Flask(__name__)
@@ -70,41 +70,40 @@ def par_eh_valido(sym):
 
 _last_signal_time = {}
 
-async def analisar_1m(sym, klines):
+async def analisar_15m(sym, klines):
 
     closes = [float(k[4]) for k in klines]
     volumes = [float(k[5]) for k in klines]
 
-    ma200 = moving_average(closes[:-1], 200)
+    ma50 = moving_average(closes[:-1],50)
 
     last_close = closes[-1]
     prev_close = closes[-2]
 
     vol_atual = volumes[-1]
-    vol_prev1 = volumes[-2]
-    vol_prev2 = volumes[-3]
+    vol_prev = volumes[-2]
 
-    vol_ok = vol_atual >= (max(vol_prev1, vol_prev2) * 1.5)
+    vol_ok = vol_atual >= vol_prev * 1.5
 
     nome = sym.replace("USDT","")
     data_hora_atual = now()
 
-    key = f"{sym}_1M_MA200"
+    key = f"{sym}_15M_MA50"
 
     now_ts = time.time()
 
     if vol_ok:
 
-        if prev_close < ma200 and last_close > ma200:
+        if prev_close < ma50 and last_close > ma50:
 
-            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_1M:
+            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
                 _last_signal_time[key] = now_ts
 
                 msg = (
-                    f"⏱ LONG 1M\n\n"
+                    f"⏱ LONG 15M\n\n"
                     f"{nome}\n"
-                    f"Preço cruzou MA200\n"
+                    f"Preço cruzou MA50\n"
                     f"Preço: {last_close:.6f}\n"
                     f"Volume 1.5x+\n"
                     f"{data_hora_atual}"
@@ -112,16 +111,16 @@ async def analisar_1m(sym, klines):
 
                 await send(msg)
 
-        elif prev_close > ma200 and last_close < ma200:
+        elif prev_close > ma50 and last_close < ma50:
 
-            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_1M:
+            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
                 _last_signal_time[key] = now_ts
 
                 msg = (
-                    f"⏱ SHORT 1M\n\n"
+                    f"⏱ SHORT 15M\n\n"
                     f"{nome}\n"
-                    f"Preço cruzou MA200\n"
+                    f"Preço cruzou MA50\n"
                     f"Preço: {last_close:.6f}\n"
                     f"Volume 1.5x+\n"
                     f"{data_hora_atual}"
@@ -203,10 +202,6 @@ async def monitor_loop():
                     await asyncio.sleep(5)
                     continue
 
-                pool = [x["symbol"] for x in data24
-                        if x.get("symbol","").endswith("USDT")
-                        and par_eh_valido(x["symbol"])]
-
                 for x in data24:
 
                     sym = x["symbol"]
@@ -221,14 +216,14 @@ async def monitor_loop():
 
                     if 5_000_000 <= vol24 <= 100_000_000:
 
-                        kl_1m = await get_json(
+                        kl_15m = await get_json(
                             s,
                             f"{BINANCE}/api/v3/klines",
-                            {"symbol":sym,"interval":"1m","limit":210}
+                            {"symbol":sym,"interval":"15m","limit":210}
                         )
 
-                        if kl_1m:
-                            await analisar_1m(sym, kl_1m)
+                        if kl_15m:
+                            await analisar_15m(sym, kl_15m)
 
                     kl_1d = await get_json(
                         s,
