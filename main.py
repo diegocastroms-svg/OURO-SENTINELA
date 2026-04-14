@@ -42,31 +42,24 @@ async def get_json(session, url, params=None):
     except:
         return None
 
-def moving_average(values, window):
-    if len(values) < window:
-        return 0
-    return sum(values[-window:]) / window
+def ema(values, period):
+    k = 2 / (period + 1)
+    ema_vals = []
+    for i, v in enumerate(values):
+        if i == 0:
+            ema_vals.append(v)
+        else:
+            ema_vals.append(v * k + ema_vals[-1] * (1 - k))
+    return ema_vals
 
 def calcular_macd(closes):
-
-    def ema(valores, periodo):
-        k = 2 / (periodo + 1)
-        emas = []
-        for i, v in enumerate(valores):
-            if i == 0:
-                emas.append(v)
-            else:
-                emas.append(v * k + emas[-1] * (1 - k))
-        return emas
-
     ema8 = ema(closes, 8)
     ema17 = ema(closes, 17)
 
     macd = [a - b for a, b in zip(ema8, ema17)]
     signal = ema(macd, 9)
-    hist = [m - s for m, s in zip(macd, signal)]
 
-    return macd, signal, hist
+    return macd, signal
 
 def par_eh_valido(sym):
 
@@ -91,19 +84,28 @@ def par_eh_valido(sym):
 
 _last_signal_time = {}
 
-async def analisar_15m(sym, klines):
+async def analisar_5m(sym, klines):
 
     closes = [float(k[4]) for k in klines]
 
-    ema9 = moving_average(closes,9)
-    ema20 = moving_average(closes,20)
-    ema50 = moving_average(closes,50)
-    ema200 = moving_average(closes,200)
+    ema9 = ema(closes,9)
+    ema20 = ema(closes,20)
+    ema50 = ema(closes,50)
+    ema200 = ema(closes,200)
 
-    macd, signal, hist = calcular_macd(closes)
+    ema9_prev = ema9[-2]
+    ema20_prev = ema20[-2]
 
-    macd_atual = hist[-1]
-    macd_prev = hist[-2]
+    ema9_atual = ema9[-1]
+    ema20_atual = ema20[-1]
+
+    macd, signal = calcular_macd(closes)
+
+    macd_prev = macd[-2]
+    macd_atual = macd[-1]
+
+    signal_prev = signal[-2]
+    signal_atual = signal[-1]
 
     last_close = closes[-1]
 
@@ -111,25 +113,14 @@ async def analisar_15m(sym, klines):
     data_hora_atual = now()
 
     key = f"{sym}_5M_SETUP"
-
     now_ts = time.time()
 
-    ema_proximas = (
-        abs(ema9 - ema20) / ema20 < 0.0015 and
-        abs(ema20 - ema50) / ema50 < 0.0025
-    )
-
-    nao_esticado = abs(last_close - ema9) / ema9 < 0.003
-
-    # LONG
+    # LONG (início real)
     if (
-        last_close > ema200 and
-        ema9 > ema20 > ema50 and
-        ema_proximas and
-        nao_esticado and
-        macd_atual > 0 and
-        macd_atual > macd_prev and
-        macd_atual < 0.0003
+        ema9_prev < ema20_prev and ema9_atual > ema20_atual and
+        ema20_atual > ema50[-1] and
+        macd_prev < signal_prev and macd_atual > signal_atual and
+        last_close > ema200[-1]
     ):
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
@@ -139,23 +130,19 @@ async def analisar_15m(sym, klines):
             msg = (
                 f"🚀 LONG INÍCIO\n\n"
                 f"{nome}\n"
-                f"EMA próximas + início de movimento\n"
-                f"MACD verde iniciando\n"
+                f"Cruzamento EMA + MACD\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
 
             await send(msg)
 
-    # SHORT
+    # SHORT (início real)
     elif (
-        last_close < ema200 and
-        ema9 < ema20 < ema50 and
-        ema_proximas and
-        nao_esticado and
-        macd_atual < 0 and
-        macd_atual < macd_prev and
-        macd_atual > -0.0003
+        ema9_prev > ema20_prev and ema9_atual < ema20_atual and
+        ema20_atual < ema50[-1] and
+        macd_prev > signal_prev and macd_atual < signal_atual and
+        last_close < ema200[-1]
     ):
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
@@ -165,8 +152,7 @@ async def analisar_15m(sym, klines):
             msg = (
                 f"🔻 SHORT INÍCIO\n\n"
                 f"{nome}\n"
-                f"EMA próximas + início de movimento\n"
-                f"MACD vermelho iniciando\n"
+                f"Cruzamento EMA + MACD\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
