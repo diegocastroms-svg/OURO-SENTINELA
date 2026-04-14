@@ -10,8 +10,8 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 SCAN_INTERVAL = 30
 MIN_QV_USDT = 10_000_000
 
-COOLDOWN_15M = 3600
-COOLDOWN_1D = 86400
+COOLDOWN_15M = 14400
+COOLDOWN_1D = 14400
 
 app = Flask(__name__)
 
@@ -47,6 +47,36 @@ def moving_average(values, window):
         return 0
     return sum(values[-window:]) / window
 
+def calcular_macd(closes):
+    ema12 = []
+    ema26 = []
+
+    k12 = 2/(12+1)
+    k26 = 2/(26+1)
+
+    for i, price in enumerate(closes):
+        if i == 0:
+            ema12.append(price)
+            ema26.append(price)
+        else:
+            ema12.append(price * k12 + ema12[-1]*(1-k12))
+            ema26.append(price * k26 + ema26[-1]*(1-k26))
+
+    macd = [a-b for a,b in zip(ema12, ema26)]
+
+    signal = []
+    k9 = 2/(9+1)
+
+    for i, val in enumerate(macd):
+        if i == 0:
+            signal.append(val)
+        else:
+            signal.append(val * k9 + signal[-1]*(1-k9))
+
+    hist = [m-s for m,s in zip(macd, signal)]
+
+    return macd, signal, hist
+
 def par_eh_valido(sym):
 
     base = sym.replace("USDT", "").upper()
@@ -73,118 +103,72 @@ _last_signal_time = {}
 async def analisar_15m(sym, klines):
 
     closes = [float(k[4]) for k in klines]
-    volumes = [float(k[5]) for k in klines]
 
-    ma50 = moving_average(closes[:-1],50)
+    ema9 = moving_average(closes,9)
+    ema20 = moving_average(closes,20)
+    ema50 = moving_average(closes,50)
+    ema200 = moving_average(closes,200)
+
+    macd, signal, hist = calcular_macd(closes)
+
+    macd_atual = hist[-1]
+    macd_prev = hist[-2]
 
     last_close = closes[-1]
-    prev_close = closes[-2]
-
-    vol_atual = volumes[-1]
-    vol_prev = volumes[-2]
-
-    vol_ok = vol_atual >= vol_prev * 1.5
 
     nome = sym.replace("USDT","")
     data_hora_atual = now()
 
-    key = f"{sym}_15M_MA50"
+    key = f"{sym}_5M_SETUP"
 
     now_ts = time.time()
 
-    if vol_ok:
+    # LONG
+    if (
+        last_close > ema200 and
+        ema9 > ema20 > ema50 and
+        macd_prev < 0 and macd_atual > 0
+    ):
 
-        if prev_close < ma50 and last_close > ma50:
+        if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
-            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
+            _last_signal_time[key] = now_ts
 
-                _last_signal_time[key] = now_ts
+            msg = (
+                f"🚀 LONG INÍCIO\n\n"
+                f"{nome}\n"
+                f"EMA alinhadas + tendência\n"
+                f"MACD virando verde\n"
+                f"Preço: {last_close:.6f}\n"
+                f"{data_hora_atual}"
+            )
 
-                msg = (
-                    f"⏱ LONG 15M\n\n"
-                    f"{nome}\n"
-                    f"Preço cruzou MA50\n"
-                    f"Preço: {last_close:.6f}\n"
-                    f"Volume 1.5x+\n"
-                    f"{data_hora_atual}"
-                )
+            await send(msg)
 
-                await send(msg)
+    # SHORT
+    elif (
+        last_close < ema200 and
+        ema9 < ema20 < ema50 and
+        macd_prev > 0 and macd_atual < 0
+    ):
 
-        elif prev_close > ma50 and last_close < ma50:
+        if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
-            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
+            _last_signal_time[key] = now_ts
 
-                _last_signal_time[key] = now_ts
+            msg = (
+                f"🔻 SHORT INÍCIO\n\n"
+                f"{nome}\n"
+                f"EMA alinhadas + tendência\n"
+                f"MACD virando vermelho\n"
+                f"Preço: {last_close:.6f}\n"
+                f"{data_hora_atual}"
+            )
 
-                msg = (
-                    f"⏱ SHORT 15M\n\n"
-                    f"{nome}\n"
-                    f"Preço cruzou MA50\n"
-                    f"Preço: {last_close:.6f}\n"
-                    f"Volume 1.5x+\n"
-                    f"{data_hora_atual}"
-                )
-
-                await send(msg)
+            await send(msg)
 
 async def analisar_1d(sym, klines):
-
-    closes = [float(k[4]) for k in klines]
-    volumes = [float(k[5]) for k in klines]
-
-    ma50 = moving_average(closes[:-1],50)
-
-    last_close = closes[-1]
-    prev_close = closes[-2]
-
-    vol_atual = volumes[-1]
-    vol_prev = volumes[-2]
-
-    vol_ok = vol_atual >= vol_prev * 1.5
-
-    nome = sym.replace("USDT","")
-    data_hora_atual = now()
-
-    key = f"{sym}_1D_MA50"
-
-    now_ts = time.time()
-
-    if vol_ok:
-
-        if prev_close < ma50 and last_close > ma50:
-
-            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_1D:
-
-                _last_signal_time[key] = now_ts
-
-                msg = (
-                    f"📅 LONG 1D\n\n"
-                    f"{nome}\n"
-                    f"Preço cruzou MA50\n"
-                    f"Preço: {last_close:.6f}\n"
-                    f"Volume 1.5x+\n"
-                    f"{data_hora_atual}"
-                )
-
-                await send(msg)
-
-        elif prev_close > ma50 and last_close < ma50:
-
-            if now_ts - _last_signal_time.get(key,0) > COOLDOWN_1D:
-
-                _last_signal_time[key] = now_ts
-
-                msg = (
-                    f"📅 SHORT 1D\n\n"
-                    f"{nome}\n"
-                    f"Preço cruzou MA50\n"
-                    f"Preço: {last_close:.6f}\n"
-                    f"Volume 1.5x+\n"
-                    f"{data_hora_atual}"
-                )
-
-                await send(msg)
+    return
 
 async def monitor_loop():
 
@@ -219,20 +203,11 @@ async def monitor_loop():
                         kl_15m = await get_json(
                             s,
                             f"{BINANCE}/api/v3/klines",
-                            {"symbol":sym,"interval":"15m","limit":210}
+                            {"symbol":sym,"interval":"5m","limit":210}
                         )
 
                         if kl_15m:
                             await analisar_15m(sym, kl_15m)
-
-                    kl_1d = await get_json(
-                        s,
-                        f"{BINANCE}/api/v3/klines",
-                        {"symbol":sym,"interval":"1d","limit":100}
-                    )
-
-                    if kl_1d:
-                        await analisar_1d(sym, kl_1d)
 
                     await asyncio.sleep(0.05)
 
