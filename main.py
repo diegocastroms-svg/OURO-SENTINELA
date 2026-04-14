@@ -48,32 +48,23 @@ def moving_average(values, window):
     return sum(values[-window:]) / window
 
 def calcular_macd(closes):
-    ema12 = []
-    ema26 = []
 
-    k12 = 2/(12+1)
-    k26 = 2/(26+1)
+    def ema(valores, periodo):
+        k = 2 / (periodo + 1)
+        emas = []
+        for i, v in enumerate(valores):
+            if i == 0:
+                emas.append(v)
+            else:
+                emas.append(v * k + emas[-1] * (1 - k))
+        return emas
 
-    for i, price in enumerate(closes):
-        if i == 0:
-            ema12.append(price)
-            ema26.append(price)
-        else:
-            ema12.append(price * k12 + ema12[-1]*(1-k12))
-            ema26.append(price * k26 + ema26[-1]*(1-k26))
+    ema8 = ema(closes, 8)
+    ema17 = ema(closes, 17)
 
-    macd = [a-b for a,b in zip(ema12, ema26)]
-
-    signal = []
-    k9 = 2/(9+1)
-
-    for i, val in enumerate(macd):
-        if i == 0:
-            signal.append(val)
-        else:
-            signal.append(val * k9 + signal[-1]*(1-k9))
-
-    hist = [m-s for m,s in zip(macd, signal)]
+    macd = [a - b for a, b in zip(ema8, ema17)]
+    signal = ema(macd, 9)
+    hist = [m - s for m, s in zip(macd, signal)]
 
     return macd, signal, hist
 
@@ -123,11 +114,22 @@ async def analisar_15m(sym, klines):
 
     now_ts = time.time()
 
+    ema_proximas = (
+        abs(ema9 - ema20) / ema20 < 0.0015 and
+        abs(ema20 - ema50) / ema50 < 0.0025
+    )
+
+    nao_esticado = abs(last_close - ema9) / ema9 < 0.003
+
     # LONG
     if (
         last_close > ema200 and
         ema9 > ema20 > ema50 and
-        macd_prev < 0 and macd_atual > 0
+        ema_proximas and
+        nao_esticado and
+        macd_atual > 0 and
+        macd_atual > macd_prev and
+        macd_atual < 0.0003
     ):
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
@@ -137,8 +139,8 @@ async def analisar_15m(sym, klines):
             msg = (
                 f"🚀 LONG INÍCIO\n\n"
                 f"{nome}\n"
-                f"EMA alinhadas + tendência\n"
-                f"MACD virando verde\n"
+                f"EMA próximas + início de movimento\n"
+                f"MACD verde iniciando\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
@@ -149,7 +151,11 @@ async def analisar_15m(sym, klines):
     elif (
         last_close < ema200 and
         ema9 < ema20 < ema50 and
-        macd_prev > 0 and macd_atual < 0
+        ema_proximas and
+        nao_esticado and
+        macd_atual < 0 and
+        macd_atual < macd_prev and
+        macd_atual > -0.0003
     ):
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
@@ -159,8 +165,8 @@ async def analisar_15m(sym, klines):
             msg = (
                 f"🔻 SHORT INÍCIO\n\n"
                 f"{nome}\n"
-                f"EMA alinhadas + tendência\n"
-                f"MACD virando vermelho\n"
+                f"EMA próximas + início de movimento\n"
+                f"MACD vermelho iniciando\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
