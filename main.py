@@ -146,7 +146,7 @@ async def analisar_5m(sym, klines):
 
     macd_vermelho = macd_atual < signal_atual
 
-    elif ema_proximas and ema_alinhando_short and macd_vermelho:
+    if ema_proximas and ema_alinhando_short and macd_vermelho:
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
