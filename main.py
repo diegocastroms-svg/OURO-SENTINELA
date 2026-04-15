@@ -108,45 +108,52 @@ async def analisar_15m(sym, klines):
     key = f"{sym}_15M_SETUP"
     now_ts = time.time()
 
-    # LONG
-    ema_proximas = abs(ema9_prev - ema20_prev) / ema20_prev < 0.002
+    # === LONG ===
+    # Preço acima da EMA50 (última confirmação) + 9 e 20 começando a alinhar ou alinhadas
+    preco_acima_ema50 = last_close > ema50_atual
 
-    ema_alinhando = (
-        ema9_atual > ema20_atual > ema50_atual and
-        (ema9_atual - ema20_atual) > (ema9_prev - ema20_prev)
+    proximas = abs(ema9_atual - ema20_atual) / ema20_atual < 0.003   # EMAs 9 e 20 próximas
+
+    alinhando_long = (
+        ema9_atual > ema20_atual and
+        ema20_atual > ema50_atual - (ema50_atual * 0.002) and  # bem perto da EMA50
+        (ema9_atual - ema20_atual) >= (ema9_prev - ema20_prev)  # começando a alinhar (gap não diminuindo)
     )
 
     macd_verde = macd_atual > signal_atual
 
-    if ema_proximas and ema_alinhando and macd_verde:
+    if preco_acima_ema50 and proximas and alinhando_long and macd_verde:
         if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
             _last_signal_time[key] = now_ts
 
             msg = (
                 f"🚀 LONG 15M\n\n"
                 f"{nome}\n"
-                f"EMAs alinhando + MACD verde\n"
+                f"EMAs 9/20 alinhando + Preço > EMA50\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
             await send(msg)
 
-    # SHORT
-    ema_alinhando_short = (
-        ema9_atual < ema20_atual < ema50_atual and
-        (ema20_atual - ema9_atual) > (ema20_prev - ema9_prev)
+    # === SHORT (ao contrário) ===
+    preco_abaixo_ema50 = last_close < ema50_atual
+
+    alinhando_short = (
+        ema9_atual < ema20_atual and
+        ema20_atual < ema50_atual + (ema50_atual * 0.002) and  # bem perto da EMA50
+        (ema20_atual - ema9_atual) >= (ema20_prev - ema9_prev)  # começando a alinhar bearish
     )
 
     macd_vermelho = macd_atual < signal_atual
 
-    if ema_proximas and ema_alinhando_short and macd_vermelho:
+    if preco_abaixo_ema50 and proximas and alinhando_short and macd_vermelho:
         if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
             _last_signal_time[key] = now_ts
 
             msg = (
                 f"🔻 SHORT 15M\n\n"
                 f"{nome}\n"
-                f"EMAs alinhando + MACD vermelho\n"
+                f"EMAs 9/20 alinhando + Preço < EMA50\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
@@ -178,7 +185,7 @@ async def monitor_loop():
                         kl_15m = await get_json(
                             s,
                             f"{BINANCE}/api/v3/klines",
-                            {"symbol": sym, "interval": "15m", "limit": 210}   # ← Alterado para 15m
+                            {"symbol": sym, "interval": "15m", "limit": 210}
                         )
 
                         if kl_15m:
