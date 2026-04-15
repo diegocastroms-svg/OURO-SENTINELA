@@ -112,15 +112,17 @@ async def analisar_5m(sym, klines):
     key = f"{sym}_5M_SETUP"
     now_ts = time.time()
 
-    # LONG (simples e direto)
-    macd_verde = macd_atual > signal_atual
+    # 🔥 LONG SIMPLES (DO JEITO QUE VOCÊ QUER)
+    ema_proximas = abs(ema9_prev - ema20_prev) / ema20_prev < 0.002
 
     ema_alinhando = (
         ema9_atual > ema20_atual > ema50_atual and
         (ema9_atual - ema20_atual) > (ema9_prev - ema20_prev)
     )
 
-    if macd_verde and ema_alinhando:
+    macd_verde = macd_atual > signal_atual
+
+    if ema_proximas and ema_alinhando and macd_verde:
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
@@ -129,22 +131,22 @@ async def analisar_5m(sym, klines):
             msg = (
                 f"🚀 LONG\n\n"
                 f"{nome}\n"
-                f"MACD verde + EMAs alinhando\n"
+                f"EMAs alinhando + MACD verde\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
 
             await send(msg)
 
-    # SHORT
-    macd_vermelho = macd_atual < signal_atual
-
+    # 🔻 SHORT SIMPLES
     ema_alinhando_short = (
         ema9_atual < ema20_atual < ema50_atual and
         (ema20_atual - ema9_atual) > (ema20_prev - ema9_prev)
     )
 
-    elif macd_vermelho and ema_alinhando_short:
+    macd_vermelho = macd_atual < signal_atual
+
+    elif ema_proximas and ema_alinhando_short and macd_vermelho:
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
@@ -153,7 +155,7 @@ async def analisar_5m(sym, klines):
             msg = (
                 f"🔻 SHORT\n\n"
                 f"{nome}\n"
-                f"MACD vermelho + EMAs alinhando\n"
+                f"EMAs alinhando + MACD vermelho\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
