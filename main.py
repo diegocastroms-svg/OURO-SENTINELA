@@ -91,20 +91,17 @@ async def analisar_5m(sym, klines):
     ema9 = ema(closes,9)
     ema20 = ema(closes,20)
     ema50 = ema(closes,50)
-    ema200 = ema(closes,200)
 
     ema9_prev = ema9[-2]
     ema20_prev = ema20[-2]
 
     ema9_atual = ema9[-1]
     ema20_atual = ema20[-1]
+    ema50_atual = ema50[-1]
 
     macd, signal = calcular_macd(closes)
 
-    macd_prev = macd[-2]
     macd_atual = macd[-1]
-
-    signal_prev = signal[-2]
     signal_atual = signal[-1]
 
     last_close = closes[-1]
@@ -115,44 +112,48 @@ async def analisar_5m(sym, klines):
     key = f"{sym}_5M_SETUP"
     now_ts = time.time()
 
-    # LONG (início real)
-    if (
-        ema9_prev < ema20_prev and ema9_atual > ema20_atual and
-        ema20_atual > ema50[-1] and
-        macd_prev < signal_prev and macd_atual > signal_atual and
-        last_close > ema200[-1]
-    ):
+    # LONG (simples e direto)
+    macd_verde = macd_atual > signal_atual
+
+    ema_alinhando = (
+        ema9_atual > ema20_atual > ema50_atual and
+        (ema9_atual - ema20_atual) > (ema9_prev - ema20_prev)
+    )
+
+    if macd_verde and ema_alinhando:
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
             _last_signal_time[key] = now_ts
 
             msg = (
-                f"🚀 LONG INÍCIO\n\n"
+                f"🚀 LONG\n\n"
                 f"{nome}\n"
-                f"Cruzamento EMA + MACD\n"
+                f"MACD verde + EMAs alinhando\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
 
             await send(msg)
 
-    # SHORT (início real)
-    elif (
-        ema9_prev > ema20_prev and ema9_atual < ema20_atual and
-        ema20_atual < ema50[-1] and
-        macd_prev > signal_prev and macd_atual < signal_atual and
-        last_close < ema200[-1]
-    ):
+    # SHORT
+    macd_vermelho = macd_atual < signal_atual
+
+    ema_alinhando_short = (
+        ema9_atual < ema20_atual < ema50_atual and
+        (ema20_atual - ema9_atual) > (ema20_prev - ema9_prev)
+    )
+
+    elif macd_vermelho and ema_alinhando_short:
 
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
 
             _last_signal_time[key] = now_ts
 
             msg = (
-                f"🔻 SHORT INÍCIO\n\n"
+                f"🔻 SHORT\n\n"
                 f"{nome}\n"
-                f"Cruzamento EMA + MACD\n"
+                f"MACD vermelho + EMAs alinhando\n"
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
@@ -190,7 +191,7 @@ async def monitor_loop():
 
                     vol24 = float(x.get("quoteVolume",0))
 
-                    if 5_000_000 <= vol24 <= 100_000_000:
+                    if vol24 >= MIN_QV_USDT:
 
                         kl_15m = await get_json(
                             s,
