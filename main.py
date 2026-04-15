@@ -8,16 +8,15 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 20_000_000
+MIN_QV_USDT = 5_000_000
 
-COOLDOWN_15M = 14400
-COOLDOWN_1D = 14400
+COOLDOWN_15M = 28800   # ← Aumentado para 8 horas (melhor para TF 15m)
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "SENTINELA TREND-VOLUME ATIVO", 200
+    return "SENTINELA TREND-VOLUME 15M - ATIVO", 200
 
 def now():
     agora_brasilia = datetime.now() - timedelta(hours=3)
@@ -55,10 +54,8 @@ def ema(values, period):
 def calcular_macd(closes):
     ema8 = ema(closes, 8)
     ema17 = ema(closes, 17)
-
     macd = [a - b for a, b in zip(ema8, ema17)]
     signal = ema(macd, 9)
-
     return macd, signal
 
 def par_eh_valido(sym):
@@ -66,7 +63,6 @@ def par_eh_valido(sym):
 
     invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","BKRW","BVND","IDRT",
                "BUSD","TUSD","FDUSD","USDC","USDP","USDE","USDD","USDX","USDJ","PAXG","BFUSD",
-               # === NOVAS MOEDAS BLOQUEADAS ===
                "XUSD", "RLUSD", "EUR", "USD1")
 
     if base in invalid:
@@ -85,12 +81,12 @@ def par_eh_valido(sym):
 
 _last_signal_time = {}
 
-async def analisar_5m(sym, klines):
+async def analisar_15m(sym, klines):
     closes = [float(k[4]) for k in klines]
 
-    ema9 = ema(closes,9)
-    ema20 = ema(closes,20)
-    ema50 = ema(closes,50)
+    ema9 = ema(closes, 9)
+    ema20 = ema(closes, 20)
+    ema50 = ema(closes, 50)
 
     ema9_prev = ema9[-2]
     ema20_prev = ema20[-2]
@@ -106,13 +102,13 @@ async def analisar_5m(sym, klines):
 
     last_close = closes[-1]
 
-    nome = sym.replace("USDT","")
+    nome = sym.replace("USDT", "")
     data_hora_atual = now()
 
-    key = f"{sym}_5M_SETUP"
+    key = f"{sym}_15M_SETUP"
     now_ts = time.time()
 
-    # 🔥 LONG SIMPLES
+    # LONG
     ema_proximas = abs(ema9_prev - ema20_prev) / ema20_prev < 0.002
 
     ema_alinhando = (
@@ -123,11 +119,11 @@ async def analisar_5m(sym, klines):
     macd_verde = macd_atual > signal_atual
 
     if ema_proximas and ema_alinhando and macd_verde:
-        if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
+        if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
             _last_signal_time[key] = now_ts
 
             msg = (
-                f"🚀 LONG\n\n"
+                f"🚀 LONG 15M\n\n"
                 f"{nome}\n"
                 f"EMAs alinhando + MACD verde\n"
                 f"Preço: {last_close:.6f}\n"
@@ -135,7 +131,7 @@ async def analisar_5m(sym, klines):
             )
             await send(msg)
 
-    # 🔻 SHORT SIMPLES
+    # SHORT
     ema_alinhando_short = (
         ema9_atual < ema20_atual < ema50_atual and
         (ema20_atual - ema9_atual) > (ema20_prev - ema9_prev)
@@ -144,11 +140,11 @@ async def analisar_5m(sym, klines):
     macd_vermelho = macd_atual < signal_atual
 
     if ema_proximas and ema_alinhando_short and macd_vermelho:
-        if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
+        if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
             _last_signal_time[key] = now_ts
 
             msg = (
-                f"🔻 SHORT\n\n"
+                f"🔻 SHORT 15M\n\n"
                 f"{nome}\n"
                 f"EMAs alinhando + MACD vermelho\n"
                 f"Preço: {last_close:.6f}\n"
@@ -156,11 +152,8 @@ async def analisar_5m(sym, klines):
             )
             await send(msg)
 
-async def analisar_1d(sym, klines):
-    return
-
 async def monitor_loop():
-    await send(f"SENTINELA ATIVO EM: {now()}")
+    await send(f"SENTINELA 15M ATIVO EM: {now()}")
 
     while True:
         try:
@@ -176,21 +169,20 @@ async def monitor_loop():
 
                     if not sym.endswith("USDT"):
                         continue
-
                     if not par_eh_valido(sym):
                         continue
 
-                    vol24 = float(x.get("quoteVolume",0))
+                    vol24 = float(x.get("quoteVolume", 0))
 
                     if vol24 >= MIN_QV_USDT:
                         kl_15m = await get_json(
                             s,
                             f"{BINANCE}/api/v3/klines",
-                            {"symbol":sym,"interval":"5m","limit":210}
+                            {"symbol": sym, "interval": "15m", "limit": 210}   # ← Alterado para 15m
                         )
 
                         if kl_15m:
-                            await analisar_5m(sym, kl_15m)
+                            await analisar_15m(sym, kl_15m)
 
                     await asyncio.sleep(0.05)
 
@@ -208,5 +200,5 @@ def start_bot():
 if __name__ == "__main__":
     threading.Thread(target=start_bot, daemon=True).start()
 
-    port = int(os.getenv("PORT",10000))
+    port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
