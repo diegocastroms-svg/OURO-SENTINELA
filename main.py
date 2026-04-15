@@ -202,7 +202,7 @@ async def monitor_loop():
                         )
 
                         if kl_15m:
-                            await analisar_15m(sym, kl_15m)
+                            await analisar_5m(sym, kl_15m)   # ← Correção feita aqui
 
                     await asyncio.sleep(0.05)
 
