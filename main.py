@@ -8,7 +8,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 5_000_000
+MIN_QV_USDT = 20_000_000
 
 COOLDOWN_15M = 14400
 COOLDOWN_1D = 14400
@@ -62,11 +62,12 @@ def calcular_macd(closes):
     return macd, signal
 
 def par_eh_valido(sym):
-
     base = sym.replace("USDT", "").upper()
 
     invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","BKRW","BVND","IDRT",
-               "BUSD","TUSD","FDUSD","USDC","USDP","USDE","USDD","USDX","USDJ","PAXG","BFUSD")
+               "BUSD","TUSD","FDUSD","USDC","USDP","USDE","USDD","USDX","USDJ","PAXG","BFUSD",
+               # === NOVAS MOEDAS BLOQUEADAS ===
+               "XUSD", "RLUSD", "EUR", "USD1")
 
     if base in invalid:
         return False
@@ -85,7 +86,6 @@ def par_eh_valido(sym):
 _last_signal_time = {}
 
 async def analisar_5m(sym, klines):
-
     closes = [float(k[4]) for k in klines]
 
     ema9 = ema(closes,9)
@@ -112,7 +112,7 @@ async def analisar_5m(sym, klines):
     key = f"{sym}_5M_SETUP"
     now_ts = time.time()
 
-    # 🔥 LONG SIMPLES (DO JEITO QUE VOCÊ QUER)
+    # 🔥 LONG SIMPLES
     ema_proximas = abs(ema9_prev - ema20_prev) / ema20_prev < 0.002
 
     ema_alinhando = (
@@ -123,9 +123,7 @@ async def analisar_5m(sym, klines):
     macd_verde = macd_atual > signal_atual
 
     if ema_proximas and ema_alinhando and macd_verde:
-
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
-
             _last_signal_time[key] = now_ts
 
             msg = (
@@ -135,7 +133,6 @@ async def analisar_5m(sym, klines):
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
-
             await send(msg)
 
     # 🔻 SHORT SIMPLES
@@ -147,9 +144,7 @@ async def analisar_5m(sym, klines):
     macd_vermelho = macd_atual < signal_atual
 
     if ema_proximas and ema_alinhando_short and macd_vermelho:
-
         if now_ts - _last_signal_time.get(key,0) > COOLDOWN_15M:
-
             _last_signal_time[key] = now_ts
 
             msg = (
@@ -159,22 +154,17 @@ async def analisar_5m(sym, klines):
                 f"Preço: {last_close:.6f}\n"
                 f"{data_hora_atual}"
             )
-
             await send(msg)
 
 async def analisar_1d(sym, klines):
     return
 
 async def monitor_loop():
-
     await send(f"SENTINELA ATIVO EM: {now()}")
 
     while True:
-
         try:
-
             async with aiohttp.ClientSession() as s:
-
                 data24 = await get_json(s, f"{BINANCE}/api/v3/ticker/24hr")
 
                 if not data24:
@@ -182,7 +172,6 @@ async def monitor_loop():
                     continue
 
                 for x in data24:
-
                     sym = x["symbol"]
 
                     if not sym.endswith("USDT"):
@@ -194,7 +183,6 @@ async def monitor_loop():
                     vol24 = float(x.get("quoteVolume",0))
 
                     if vol24 >= MIN_QV_USDT:
-
                         kl_15m = await get_json(
                             s,
                             f"{BINANCE}/api/v3/klines",
@@ -202,27 +190,23 @@ async def monitor_loop():
                         )
 
                         if kl_15m:
-                            await analisar_5m(sym, kl_15m)   # ← Correção feita aqui
+                            await analisar_5m(sym, kl_15m)
 
                     await asyncio.sleep(0.05)
 
             await asyncio.sleep(SCAN_INTERVAL)
 
         except Exception as e:
-
             print(f"Erro no loop: {e}")
             await asyncio.sleep(10)
 
 def start_bot():
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(monitor_loop())
 
 if __name__ == "__main__":
-
     threading.Thread(target=start_bot, daemon=True).start()
 
     port = int(os.getenv("PORT",10000))
-
     app.run(host="0.0.0.0", port=port)
