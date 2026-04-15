@@ -1,5 +1,4 @@
 import os, asyncio, aiohttp, time, threading
-import numpy as np
 from datetime import datetime, timedelta
 from flask import Flask
 
@@ -95,18 +94,26 @@ async def analisar_15m(sym, klines):
     key = f"{sym}_15M_SETUP"
     now_ts = time.time()
 
-    # === Bollinger Bands (20, 1.8) ===
+    # === Bollinger Bands (20, 1.8) - sem numpy ===
     tp = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
-    middle = ema(tp, 20)[-1]
-    std = np.std(tp[-20:]) if len(tp) >= 20 else 0
+    
+    # Média das últimas 20 típicas (aproximação da SMA20)
+    if len(tp) >= 20:
+        middle = sum(tp[-20:]) / 20
+        # Desvio padrão simples
+        variance = sum((x - middle) ** 2 for x in tp[-20:]) / 20
+        std = variance ** 0.5
+    else:
+        middle = tp[-1]
+        std = 0
+
     upper = middle + 1.8 * std
     lower = middle - 1.8 * std
 
-    # Slope simples (última vela vs anterior) - exatamente como você pediu
-    if len(tp) >= 2:
-        tp_prev = [(highs[-2] + lows[-2] + closes[-2]) / 3]
-        middle_prev = ema(tp[-21:-1], 20)[-1] if len(tp) >= 21 else middle
-        std_prev = np.std(tp[-21:-1]) if len(tp) >= 21 else std
+    # Slope da banda superior e inferior (comparando com 3 velas atrás)
+    if len(tp) >= 5:
+        middle_prev = sum(tp[-23:-3]) / 20 if len(tp) >= 23 else middle
+        std_prev = (sum((x - middle_prev) ** 2 for x in tp[-23:-3]) / 20) ** 0.5 if len(tp) >= 23 else std
         upper_prev = middle_prev + 1.8 * std_prev
         lower_prev = middle_prev - 1.8 * std_prev
     else:
@@ -123,17 +130,11 @@ async def analisar_15m(sym, klines):
         ema20_atual > ema50_atual - (ema50_atual * 0.003) and
         (ema9_atual - ema20_atual) >= (ema9_prev - ema20_prev) and
         macd_atual > signal_atual and
-        slope_upper > 0):                     # ← Nova condição: banda superior inclinando para cima
+        slope_upper > 0):   # Banda superior inclinando para cima
 
         if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
             _last_signal_time[key] = now_ts
-            msg = (
-                f"🚀 LONG 15M\n\n"
-                f"{nome}\n"
-                f"EMAs 9/20 alinhando + Preço > EMA50 + Bollinger superior ↑\n"
-                f"Preço: {last_close:.6f}\n"
-                f"{data_hora_atual}"
-            )
+            msg = f"🚀 LONG 15M\n\n{nome}\nEMAs 9/20 alinhando + Preço > EMA50 + Bollinger superior ↑\nPreço: {last_close:.6f}\n{data_hora_atual}"
             await send(msg)
 
     # === SHORT ===
@@ -143,17 +144,11 @@ async def analisar_15m(sym, klines):
         ema20_atual < ema50_atual + (ema50_atual * 0.003) and
         (ema20_atual - ema9_atual) >= (ema20_prev - ema9_prev) and
         macd_atual < signal_atual and
-        slope_lower < 0):                     # ← Nova condição: banda inferior inclinando para baixo
+        slope_lower < 0):   # Banda inferior inclinando para baixo
 
         if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
             _last_signal_time[key] = now_ts
-            msg = (
-                f"🔻 SHORT 15M\n\n"
-                f"{nome}\n"
-                f"EMAs 9/20 alinhando + Preço < EMA50 + Bollinger inferior ↓\n"
-                f"Preço: {last_close:.6f}\n"
-                f"{data_hora_atual}"
-            )
+            msg = f"🔻 SHORT 15M\n\n{nome}\nEMAs 9/20 alinhando + Preço < EMA50 + Bollinger inferior ↓\nPreço: {last_close:.6f}\n{data_hora_atual}"
             await send(msg)
 
 async def monitor_loop():
