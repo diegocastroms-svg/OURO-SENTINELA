@@ -9,7 +9,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
 MIN_QV_USDT = 5_000_000
-COOLDOWN_15M = 28800
+COOLDOWN_15M = 7200   # ← ALTERADO PARA 2 HORAS
 
 app = Flask(__name__)
 
@@ -94,13 +94,11 @@ async def analisar_15m(sym, klines):
     key = f"{sym}_15M_SETUP"
     now_ts = time.time()
 
-    # === Bollinger Bands (20, 1.8) - sem numpy ===
+    # === Bollinger Bands (20, 1.8) ===
     tp = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
     
-    # Média das últimas 20 típicas (aproximação da SMA20)
     if len(tp) >= 20:
         middle = sum(tp[-20:]) / 20
-        # Desvio padrão simples
         variance = sum((x - middle) ** 2 for x in tp[-20:]) / 20
         std = variance ** 0.5
     else:
@@ -110,27 +108,27 @@ async def analisar_15m(sym, klines):
     upper = middle + 1.8 * std
     lower = middle - 1.8 * std
 
-    # Slope da banda superior e inferior (comparando com 3 velas atrás)
-    if len(tp) >= 5:
-        middle_prev = sum(tp[-23:-3]) / 20 if len(tp) >= 23 else middle
-        std_prev = (sum((x - middle_prev) ** 2 for x in tp[-23:-3]) / 20) ** 0.5 if len(tp) >= 23 else std
+    # === SLOPE CORRIGIDO (agora simples e preciso) ===
+    # Compara com a vela imediatamente anterior (mais intuitivo)
+    if len(tp) >= 21:
+        middle_prev = sum(tp[-21:-1]) / 20
+        variance_prev = sum((x - middle_prev) ** 2 for x in tp[-21:-1]) / 20
+        std_prev = variance_prev ** 0.5
         upper_prev = middle_prev + 1.8 * std_prev
-        lower_prev = middle_prev - 1.8 * std_prev
     else:
         upper_prev = upper
-        lower_prev = lower
 
     slope_upper = upper - upper_prev
-    slope_lower = lower - lower_prev
+    slope_lower = lower - (middle_prev - 1.8 * std_prev) if len(tp) >= 21 else 0
 
     # === LONG ===
     if (last_close > ema50_atual and
-        abs(ema9_atual - ema20_atual) / ema20_atual < 0.003 and
+        abs(ema9_atual - ema20_atual) / ema20_atual < 0.005 and   # ← alterado para 0.5%
         ema9_atual > ema20_atual and
-        ema20_atual > ema50_atual - (ema50_atual * 0.003) and
+        ema20_atual > ema50_atual - (ema50_atual * 0.005) and
         (ema9_atual - ema20_atual) >= (ema9_prev - ema20_prev) and
         macd_atual > signal_atual and
-        slope_upper > 0):   # Banda superior inclinando para cima
+        slope_upper > 0):   # ← slope corrigido
 
         if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
             _last_signal_time[key] = now_ts
@@ -139,12 +137,12 @@ async def analisar_15m(sym, klines):
 
     # === SHORT ===
     if (last_close < ema50_atual and
-        abs(ema9_atual - ema20_atual) / ema20_atual < 0.003 and
+        abs(ema9_atual - ema20_atual) / ema20_atual < 0.005 and   # ← alterado para 0.5%
         ema9_atual < ema20_atual and
-        ema20_atual < ema50_atual + (ema50_atual * 0.003) and
+        ema20_atual < ema50_atual + (ema50_atual * 0.005) and
         (ema20_atual - ema9_atual) >= (ema20_prev - ema9_prev) and
         macd_atual < signal_atual and
-        slope_lower < 0):   # Banda inferior inclinando para baixo
+        slope_lower < 0):   # ← slope corrigido
 
         if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
             _last_signal_time[key] = now_ts
