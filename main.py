@@ -2,14 +2,14 @@ import os, asyncio, aiohttp, time, threading, sys
 from datetime import datetime, timedelta
 from flask import Flask
 
-BINANCE = "https://api.binance.com"   # ← Mudado para Spot
+BINANCE = "https://api.binance.com"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-SCAN_INTERVAL = 30   # 30 segundos - mais seguro no Spot
+SCAN_INTERVAL = 90
 
-# Controle de estado: "bull", "bear" ou None
+# Controle de estado
 alert_status = {}
 
 app = Flask(__name__)
@@ -58,21 +58,21 @@ def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper().strip()
     if len(base) < 2:
         return False
-    invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","EUR","USD","BUSD","TUSD","FDUSD","USDC")
-    
-    delistadas = (
-        "ALPACA", "A2Z", "BNX", "SXP", "LRC", "RDNT", "NTRN", "IDEX", "FORTH", "OMG", "WAVES", 
-        "MKR", "BAL", "BLZ", "FTM", "LINA", "STMX", "NKN", "SC", "BAKE", "RAY", "KLAY", "FTT",
-        "AMB", "LEVER", "KEY", "COMBO", "MDT", "OXT", "HIFI", "GLMR", "STRAX", "LOOM", "BOND",
-        "ORBS", "STPT", "TOKEN", "SNT", "BADGER", "MYRO", "OMNI", "VOXEL", "VIDT", "NULS",
-        "CHESS", "BSW", "QUICK", "NEIROETH", "UXLINK", "KDA", "PONKE", "HIPPO", "SLERF",
-        "BID", "FUN", "XCN", "EPT", "MEMEFI", "FIS", "MILK", "OBOL",
-        "OL", "RLS", "PUFFER", "VFY", "RVV", "42", "COMMON", "BDXN", "TANSSI", "ZRC",
-        "SKATE", "DMC"
-    )
-    if any(k in base for k in delistadas):
+
+    # ==================== MOEDAS BLOQUEADAS ====================
+    blocked = ("CREAM", "PNT", "MDX", "ALPACA", "A2Z", "BNX", "SXP", "LRC", "RDNT", 
+               "NTRN", "IDEX", "FORTH", "OMG", "WAVES", "MKR", "BAL", "BLZ", "FTM", 
+               "LINA", "STMX", "NKN", "SC", "BAKE", "RAY", "KLAY", "FTT", "AMB", 
+               "LEVER", "KEY", "COMBO", "MDT", "OXT", "HIFI", "GLMR", "STRAX", 
+               "LOOM", "BOND", "ORBS", "STPT", "TOKEN", "SNT", "BADGER", "MYRO", 
+               "OMNI", "VOXEL", "VIDT", "NULS", "CHESS", "BSW", "QUICK", "NEIROETH", 
+               "UXLINK", "KDA", "PONKE", "HIPPO", "SLERF", "BID", "FUN", "XCN", 
+               "EPT", "MEMEFI", "FIS", "MILK", "OBOL", "OL", "RLS", "PUFFER", 
+               "VFY", "RVV", "42", "COMMON", "BDXN", "TANSSI", "ZRC", "SKATE", "DMC")
+
+    if any(k in base for k in blocked):
         return False
-    
+
     lixo = ("INU","PEPE","FLOKI","BABY","CAT","DOGE2","SHIB2","MOON","PUP","PUPPY","OLD","NEW")
     if any(k in base for k in lixo):
         return False
@@ -114,7 +114,7 @@ async def analisar_5m(sym, klines):
     bb_lower = bb_middle - (2 * bb_std)
     bandwidth = (bb_upper - bb_lower) / bb_middle if bb_middle != 0 else 0
 
-    # Bollinger da vela anterior (para detectar boca abrindo)
+    # Bollinger da vela anterior
     if len(closes) >= 21:
         prev_closes = closes[-21:-1]
         bb_middle_prev = sum(prev_closes) / 20
@@ -126,20 +126,17 @@ async def analisar_5m(sym, klines):
     else:
         boca_abrindo = False
 
-    # Condições principais
     acima_bb     = last_close > bb_middle
     abaixo_bb    = last_close < bb_middle
     acima_ema    = last_close > ema9[-1]
     abaixo_ema   = last_close < ema9[-1]
 
-    # Toque na banda (com pequena tolerância)
     tocou_banda_superior = last_close >= bb_upper * 0.999
     tocou_banda_inferior = last_close <= bb_lower * 1.001
 
     condicao_bull = acima_bb and acima_ema and tocou_banda_superior and boca_abrindo
     condicao_bear = abaixo_bb and abaixo_ema and tocou_banda_inferior and boca_abrindo
 
-    # Controle de estado para evitar alertas repetidos
     status_atual = alert_status.get(sym, None)
 
     if condicao_bull:
@@ -147,7 +144,7 @@ async def analisar_5m(sym, klines):
             alert_status[sym] = "bull"
             msg = f"🟢 SENTINELA LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\nToque na banda superior + Acima EMA9 + BB abrindo\n{now()}"
             await send(msg)
-            print(f"✅ ALERTA LONG ENVIADO → {nome} | Preço: {last_close:.6f}")
+            print(f"✅ ALERTA LONG ENVIADO → {nome}")
             sys.stdout.flush()
 
     elif condicao_bear:
@@ -155,14 +152,13 @@ async def analisar_5m(sym, klines):
             alert_status[sym] = "bear"
             msg = f"🔴 SENTINELA SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\nToque na banda inferior + Abaixo EMA9 + BB abrindo\n{now()}"
             await send(msg)
-            print(f"✅ ALERTA SHORT ENVIADO → {nome} | Preço: {last_close:.6f}")
+            print(f"✅ ALERTA SHORT ENVIADO → {nome}")
             sys.stdout.flush()
 
     else:
         if status_atual is not None:
             alert_status[sym] = None
-            print(f"   📉 {nome} perdeu o padrão (pronto para novo alerta)")
-            sys.stdout.flush()
+            print(f"   📉 {nome} perdeu o padrão")
 
 # ====================== MONITOR LOOP ======================
 async def monitor_loop():
@@ -186,12 +182,6 @@ async def monitor_loop():
                 top_25 = pegar_top_25_gainers(data24)
                 
                 print(f"✅ Top 25 Spot: {', '.join(top_25) if top_25 else 'VAZIO'}")
-                for sym in top_25:
-                    for t in data24:
-                        if t.get('symbol') == sym:
-                            change = t.get('priceChangePercent', 'N/A')
-                            print(f"   → {sym}  (+{change}%)")
-                            break
                 sys.stdout.flush()
 
                 for sym in top_25:
@@ -199,7 +189,7 @@ async def monitor_loop():
                                            {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.25)
 
             print(f"[{now()}] Ciclo finalizado - aguardando {SCAN_INTERVAL}s...\n")
             sys.stdout.flush()
