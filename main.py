@@ -8,6 +8,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
+MIN_QUOTE_VOLUME = 8_000_000   # ← Volume mínimo em USDT (ajuste se quiser)
 
 app = Flask(__name__)
 
@@ -67,13 +68,19 @@ def pegar_top_5_gainers(tickers):
     if not tickers or not isinstance(tickers, list):
         return []
     
-    lista_usdt = [
-        t for t in tickers
-        if isinstance(t, dict) and t.get('symbol','').endswith('USDT') and par_eh_valido(t.get('symbol',''))
-    ]
+    # Filtro forte: só moedas com volume decente em Futuros
+    lista_filtrada = []
+    for t in tickers:
+        if (isinstance(t, dict) and 
+            t.get('symbol','').endswith('USDT') and 
+            par_eh_valido(t.get('symbol',''))):
+            
+            volume = float(t.get('quoteVolume', 0))
+            if volume >= MIN_QUOTE_VOLUME:
+                lista_filtrada.append(t)
     
     top_5 = sorted(
-        lista_usdt,
+        lista_filtrada,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
     )[:5]
@@ -116,7 +123,7 @@ async def analisar_5m(sym, klines):
         sys.stdout.flush()
 
 async def monitor_loop():
-    print("🚀 Monitoramento FUTUROS iniciado")
+    print("🚀 Monitoramento FUTUROS iniciado (com filtro de volume)")
     sys.stdout.flush()
     await send(f"SENTINELA 5M ATIVO EM: {now()}")
     
@@ -134,16 +141,7 @@ async def monitor_loop():
                     continue
 
                 top_5 = pegar_top_5_gainers(data24)
-                
-                # Log mais informativo
-                print(f"✅ Top 5 Futuros: {', '.join(top_5) if top_5 else 'VAZIO'}")
-                for sym in top_5:
-                    # Tenta mostrar % de alta
-                    for t in data24:
-                        if t.get('symbol') == sym:
-                            change = t.get('priceChangePercent', 'N/A')
-                            print(f"   → {sym}  (+{change}%)")
-                            break
+                print(f"✅ Top 5 Futuros (volume > {MIN_QUOTE_VOLUME:,} USDT): {', '.join(top_5) if top_5 else 'VAZIO'}")
                 sys.stdout.flush()
 
                 for sym in top_5:
