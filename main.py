@@ -103,6 +103,7 @@ async def analisar_5m(sym, klines):
     ema9 = ema(closes, 9)
     last_close = closes[-1]
 
+    # Bollinger 20
     if len(closes) >= 20:
         bb_media = sum(closes[-20:]) / 20
         bb_std = (sum((x - bb_media) ** 2 for x in closes[-20:]) / 20) ** 0.5
@@ -110,6 +111,7 @@ async def analisar_5m(sym, klines):
     else:
         return
 
+    # Banda superior da vela ANTERIOR (pra detectar se está apontando pra cima)
     if len(closes) >= 21:
         bb_media_prev = sum(closes[-21:-1]) / 20
         bb_std_prev = (sum((x - bb_media_prev) ** 2 for x in closes[-21:-1]) / 20) ** 0.5
@@ -117,27 +119,27 @@ async def analisar_5m(sym, klines):
     else:
         bb_superior_prev = bb_superior
 
-    cond1 = closes[-1] > bb_media
-    cond2 = (closes[-2] <= ema9[-2] * 1.01 or closes[-3] <= ema9[-3] * 1.01)
-    cond3 = closes[-1] > closes[-2]
-    cond4 = bb_superior > bb_superior_prev
-    cond5 = closes[-1] >= bb_superior * 0.98
+    # ==================== CONDIÇÕES EXATAS QUE VOCÊ PEDIU ====================
+    acima_da_media     = closes[-1] > bb_media                                      # preço acima da média Bollinger 20
+    tocou_ema9         = (closes[-2] <= ema9[-2] * 1.01 or closes[-3] <= ema9[-3] * 1.01)  # tocou a EMA 9 nos últimos 2-3 candles
+    banda_apontando_cima = bb_superior > bb_superior_prev                           # banda superior virando/apontando pra cima
 
-    condicao_formada = cond1 and cond2 and cond3 and cond4 and cond5
+    condicao_formada = acima_da_media and tocou_ema9 and banda_apontando_cima
+
     nome = sym.replace("USDT", "")
 
     if condicao_formada:
-        if not alert_status.get(sym, False):           # primeira vez que formou
+        if not alert_status.get(sym, False):           # primeira vez que formou o alinhamento
             alert_status[sym] = True
             msg = f"🚀 SENTINELA 5M\n\n{nome}\nPreço: {last_close:.6f}\nRompimento Bollinger 5M\n{now()}"
             await send(msg)
             print(f"✅ ALERTA ENVIADO → {nome}")
             sys.stdout.flush()
-        # se já estava formado → NÃO manda nada (fica em silêncio)
+        # se já estava alinhado → NÃO manda nada (evita spam)
     else:
-        if alert_status.get(sym, False):               # perdeu o rompimento
+        if alert_status.get(sym, False):               # perdeu o alinhamento (banda parou de apontar pra cima ou preço caiu da média)
             alert_status[sym] = False
-            print(f"   📉 {nome} perdeu o rompimento (pronto pra novo alerta)")
+            print(f"   📉 {nome} perdeu o alinhamento (pronto pra novo alerta)")
 
 async def monitor_loop():
     print("🚀 Monitoramento FUTUROS iniciado")
