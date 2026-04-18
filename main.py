@@ -9,7 +9,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
 
-# 🔥 Controle de estado: alerta SÓ quando o rompimento se forma de novo
+# Controle de estado: "bull", "bear" ou None
 alert_status = {}
 
 app = Flask(__name__)
@@ -78,7 +78,8 @@ def par_eh_valido(sym):
         return False
     return True
 
-def pegar_top_10_gainers(tickers):
+# ====================== ALTERADO ======================
+def pegar_top_25_gainers(tickers):
     if not tickers or not isinstance(tickers, list):
         return []
     
@@ -87,14 +88,15 @@ def pegar_top_10_gainers(tickers):
         if isinstance(t, dict) and t.get('symbol','').endswith('USDT') and par_eh_valido(t.get('symbol',''))
     ]
     
-    top_10 = sorted(
+    top_25 = sorted(
         lista_usdt,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
-    )[:10]
+    )[:25]
     
-    return [moeda['symbol'] for moeda in top_10]
+    return [moeda['symbol'] for moeda in top_25]
 
+# ====================== NOVA LÓGICA ======================
 async def analisar_5m(sym, klines):
     closes = [float(k[4]) for k in klines]
     if len(closes) < 30:
@@ -102,45 +104,62 @@ async def analisar_5m(sym, klines):
 
     ema9 = ema(closes, 9)
     last_close = closes[-1]
-
-    # Bollinger 20
-    if len(closes) >= 20:
-        bb_media = sum(closes[-20:]) / 20
-        bb_std = (sum((x - bb_media) ** 2 for x in closes[-20:]) / 20) ** 0.5
-        bb_superior = bb_media + (2 * bb_std)
-    else:
-        return
-
-    # Banda superior da vela ANTERIOR (pra detectar se está apontando pra cima)
-    if len(closes) >= 21:
-        bb_media_prev = sum(closes[-21:-1]) / 20
-        bb_std_prev = (sum((x - bb_media_prev) ** 2 for x in closes[-21:-1]) / 20) ** 0.5
-        bb_superior_prev = bb_media_prev + (2 * bb_std_prev)
-    else:
-        bb_superior_prev = bb_superior
-
-    # ==================== CONDIÇÕES EXATAS QUE VOCÊ PEDIU ====================
-    acima_da_media     = closes[-1] > bb_media                                      # preço acima da média Bollinger 20
-    tocou_ema9         = (closes[-2] <= ema9[-2] * 1.01 or closes[-3] <= ema9[-3] * 1.01)  # tocou a EMA 9 nos últimos 2-3 candles
-    banda_apontando_cima = bb_superior > bb_superior_prev                           # banda superior virando/apontando pra cima
-
-    condicao_formada = acima_da_media and tocou_ema9 and banda_apontando_cima
-
     nome = sym.replace("USDT", "")
 
-    if condicao_formada:
-        if not alert_status.get(sym, False):           # primeira vez que formou o alinhamento
-            alert_status[sym] = True
-            msg = f"🚀 SENTINELA 5M\n\n{nome}\nPreço: {last_close:.6f}\nRompimento Bollinger 5M\n{now()}"
-            await send(msg)
-            print(f"✅ ALERTA ENVIADO → {nome}")
-            sys.stdout.flush()
-        # se já estava alinhado → NÃO manda nada (evita spam)
-    else:
-        if alert_status.get(sym, False):               # perdeu o alinhamento (banda parou de apontar pra cima ou preço caiu da média)
-            alert_status[sym] = False
-            print(f"   📉 {nome} perdeu o alinhamento (pronto pra novo alerta)")
+    # Bollinger 20 atual
+    if len(closes) < 20:
+        return
+    bb_middle = sum(closes[-20:]) / 20
+    bb_std = (sum((x - bb_middle) ** 2 for x in closes[-20:]) / 20) ** 0.5
+    bb_upper = bb_middle + (2 * bb_std)
+    bb_lower = bb_middle - (2 * bb_std)
+    bandwidth = (bb_upper - bb_lower) / bb_middle if bb_middle != 0 else 0
 
+    # Bollinger da vela anterior (para detectar se está abrindo)
+    if len(closes) >= 21:
+        prev_closes = closes[-21:-1]
+        bb_middle_prev = sum(prev_closes) / 20
+        bb_std_prev = (sum((x - bb_middle_prev) ** 2 for x in prev_closes) / 20) ** 0.5
+        bb_upper_prev = bb_middle_prev + (2 * bb_std_prev)
+        bb_lower_prev = bb_middle_prev - (2 * bb_std_prev)
+        bandwidth_prev = (bb_upper_prev - bb_lower_prev) / bb_middle_prev if bb_middle_prev != 0 else 0
+        boca_abrindo = bandwidth > bandwidth_prev * 1.001   # pequena tolerância para evitar ruído
+    else:
+        boca_abrindo = False
+
+    acima_ema = last_close > ema9[-1]
+    abaixo_ema = last_close < ema9[-1]
+
+    condicao_bull = acima_ema and boca_abrindo
+    condicao_bear = abaixo_ema and boca_abrindo
+
+    # Controle para evitar alertas repetidos
+    status_atual = alert_status.get(sym, None)
+
+    if condicao_bull:
+        if status_atual != "bull":
+            alert_status[sym] = "bull"
+            msg = f"🚀 BOCA DE JACARÉ BULL 5M\n\n{nome}\nPreço: {last_close:.6f}\nPreço acima da EMA 9 + Bollinger abrindo\n{now()}"
+            await send(msg)
+            print(f"✅ ALERTA BULL ENVIADO → {nome} | Preço: {last_close:.6f}")
+            sys.stdout.flush()
+
+    elif condicao_bear:
+        if status_atual != "bear":
+            alert_status[sym] = "bear"
+            msg = f"🐻 BOCA DE JACARÉ BEAR 5M\n\n{nome}\nPreço: {last_close:.6f}\nPreço abaixo da EMA 9 + Bollinger abrindo\n{now()}"
+            await send(msg)
+            print(f"✅ ALERTA BEAR ENVIADO → {nome} | Preço: {last_close:.6f}")
+            sys.stdout.flush()
+
+    else:
+        # Perdeu o padrão → libera para novo alerta no futuro
+        if status_atual is not None:
+            alert_status[sym] = None
+            print(f"   📉 {nome} perdeu o padrão (pronto para novo alerta)")
+            sys.stdout.flush()
+
+# ====================== MONITOR LOOP ======================
 async def monitor_loop():
     print("🚀 Monitoramento FUTUROS iniciado")
     sys.stdout.flush()
@@ -159,10 +178,10 @@ async def monitor_loop():
                     await asyncio.sleep(10)
                     continue
 
-                top_10 = pegar_top_10_gainers(data24)
+                top_25 = pegar_top_25_gainers(data24)
                 
-                print(f"✅ Top 10 Futuros: {', '.join(top_10) if top_10 else 'VAZIO'}")
-                for sym in top_10:
+                print(f"✅ Top 25 Futuros: {', '.join(top_25) if top_25 else 'VAZIO'}")
+                for sym in top_25:
                     for t in data24:
                         if t.get('symbol') == sym:
                             change = t.get('priceChangePercent', 'N/A')
@@ -170,7 +189,7 @@ async def monitor_loop():
                             break
                 sys.stdout.flush()
 
-                for sym in top_10:
+                for sym in top_25:
                     kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines", 
                                            {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
