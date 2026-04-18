@@ -52,31 +52,32 @@ def ema(values, period):
     return ema_vals
 
 def par_eh_valido(sym):
-    base = sym.replace("USDT", "").upper()
-    invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","BKRW","BVND","IDRT",
-               "BUSD","TUSD","FDUSD","USDC","USDP","USDE","USDD","USDX","USDJ","PAXG","BFUSD",
-               "XUSD", "RLUSD", "EUR", "USD1")
-    if base in invalid: return False
-    lixo = ("INU","PEPE","FLOKI","BABY","CAT","DOGE2","SHIB2","MOON","MEME","OLD","NEW",
-            "PUP","PUPPY","TURBO","WIF","AI")
-    if any(k in base for k in lixo): return False
-    if sym.endswith(("UPUSDT","DOWNUSDT","BULLUSDT","BEARUSDT")): return False
+    base = sym.replace("USDT", "").upper().strip()
+    if len(base) < 2:
+        return False
+    invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","EUR","USD","BUSD","TUSD","FDUSD","USDC")
+    if base in invalid:
+        return False
+    lixo = ("INU","PEPE","FLOKI","BABY","CAT","DOGE2","SHIB2","MOON","PUP","PUPPY","OLD","NEW")
+    if any(k in base for k in lixo):
+        return False
     return True
 
 def pegar_top_5_gainers(tickers):
     if not tickers or not isinstance(tickers, list):
-        print("⚠️ tickers inválido")
-        sys.stdout.flush()
         return []
+    
     lista_usdt = [
         t for t in tickers
         if isinstance(t, dict) and t.get('symbol','').endswith('USDT') and par_eh_valido(t.get('symbol',''))
     ]
+    
     top_5 = sorted(
         lista_usdt,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
     )[:5]
+    
     return [moeda['symbol'] for moeda in top_5]
 
 async def analisar_5m(sym, klines):
@@ -115,29 +116,30 @@ async def analisar_5m(sym, klines):
         sys.stdout.flush()
 
 async def monitor_loop():
-    print("🚀 Monitoramento FUTUROS iniciado - Loop principal")
+    print("🚀 Monitoramento FUTUROS iniciado")
     sys.stdout.flush()
     await send(f"SENTINELA 5M ATIVO EM: {now()}")
     
     while True:
-        print(f"[{now()}] Iniciando ciclo de verificação...")
+        print(f"[{now()}] Iniciando ciclo...")
         sys.stdout.flush()
         try:
             async with aiohttp.ClientSession() as s:
                 data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
                 
                 if not data24:
-                    print("❌ Não conseguiu pegar os tickers")
+                    print("❌ Falha ao pegar tickers")
                     sys.stdout.flush()
                     await asyncio.sleep(10)
                     continue
 
                 top_5 = pegar_top_5_gainers(data24)
-                print(f"✅ Top 5 Gainers: {', '.join(top_5) if top_5 else 'VAZIO'}")
+                print(f"✅ Top 5 Futuros: {', '.join(top_5) if top_5 else 'VAZIO'}")
                 sys.stdout.flush()
 
                 for sym in top_5:
-                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines", {"symbol": sym, "interval": "5m", "limit": 100})
+                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines", 
+                                           {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
                     await asyncio.sleep(0.1)
@@ -147,22 +149,16 @@ async def monitor_loop():
             await asyncio.sleep(SCAN_INTERVAL)
             
         except Exception as e:
-            print(f"❌ ERRO NO LOOP: {e}")
+            print(f"❌ ERRO: {e}")
             sys.stdout.flush()
             await asyncio.sleep(10)
 
 def start_flask():
-    print("Iniciando Flask em background...")
-    sys.stdout.flush()
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    print("Iniciando aplicação - Loop asyncio no thread principal")
+    print("Iniciando Sentinela 5M...")
     sys.stdout.flush()
-    
-    # Flask roda em thread secundária
     threading.Thread(target=start_flask, daemon=True).start()
-    
-    # Loop principal (asyncio) roda no thread principal → logs aparecem
     asyncio.run(monitor_loop())
