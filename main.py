@@ -8,7 +8,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QUOTE_VOLUME = 8_000_000   # ← Volume mínimo em USDT (ajuste se quiser)
 
 app = Flask(__name__)
 
@@ -57,35 +56,42 @@ def par_eh_valido(sym):
     if len(base) < 2:
         return False
     invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","EUR","USD","BUSD","TUSD","FDUSD","USDC")
-    if base in invalid:
+    
+    # 🔥 DELISTADAS (não operáveis - bloqueadas permanentemente)
+    delistadas = (
+        "ALPACA", "A2Z", "BNX", "SXP", "LRC", "RDNT", "NTRN", "IDEX", "FORTH", "OMG", "WAVES", 
+        "MKR", "BAL", "BLZ", "FTM", "LINA", "STMX", "NKN", "SC", "BAKE", "RAY", "KLAY", "FTT",
+        "AMB", "LEVER", "KEY", "COMBO", "MDT", "OXT", "HIFI", "GLMR", "STRAX", "LOOM", "BOND",
+        "ORBS", "STPT", "TOKEN", "SNT", "BADGER", "MYRO", "OMNI", "VOXEL", "VIDT", "NULS",
+        "CHESS", "BSW", "QUICK", "NEIROETH", "UXLINK", "KDA", "PONKE", "HIPPO", "SLERF",
+        "BID", "FUN", "XCN", "EPT", "MEMEFI", "FIS", "MILK", "OBOL",
+        "OL", "RLS", "PUFFER", "VFY", "RVV", "42", "COMMON", "BDXN", "TANSSI", "ZRC",
+        "SKATE", "DMC"
+    )
+    if any(k in base for k in delistadas):
         return False
+    
     lixo = ("INU","PEPE","FLOKI","BABY","CAT","DOGE2","SHIB2","MOON","PUP","PUPPY","OLD","NEW")
     if any(k in base for k in lixo):
         return False
     return True
 
-def pegar_top_5_gainers(tickers):
+def pegar_top_10_gainers(tickers):
     if not tickers or not isinstance(tickers, list):
         return []
     
-    # Filtro forte: só moedas com volume decente em Futuros
-    lista_filtrada = []
-    for t in tickers:
-        if (isinstance(t, dict) and 
-            t.get('symbol','').endswith('USDT') and 
-            par_eh_valido(t.get('symbol',''))):
-            
-            volume = float(t.get('quoteVolume', 0))
-            if volume >= MIN_QUOTE_VOLUME:
-                lista_filtrada.append(t)
+    lista_usdt = [
+        t for t in tickers
+        if isinstance(t, dict) and t.get('symbol','').endswith('USDT') and par_eh_valido(t.get('symbol',''))
+    ]
     
-    top_5 = sorted(
-        lista_filtrada,
+    top_10 = sorted(
+        lista_usdt,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
-    )[:5]
+    )[:10]
     
-    return [moeda['symbol'] for moeda in top_5]
+    return [moeda['symbol'] for moeda in top_10]
 
 async def analisar_5m(sym, klines):
     closes = [float(k[4]) for k in klines]
@@ -123,7 +129,7 @@ async def analisar_5m(sym, klines):
         sys.stdout.flush()
 
 async def monitor_loop():
-    print("🚀 Monitoramento FUTUROS iniciado (com filtro de volume)")
+    print("🚀 Monitoramento FUTUROS iniciado")
     sys.stdout.flush()
     await send(f"SENTINELA 5M ATIVO EM: {now()}")
     
@@ -140,11 +146,20 @@ async def monitor_loop():
                     await asyncio.sleep(10)
                     continue
 
-                top_5 = pegar_top_5_gainers(data24)
-                print(f"✅ Top 5 Futuros (volume > {MIN_QUOTE_VOLUME:,} USDT): {', '.join(top_5) if top_5 else 'VAZIO'}")
+                top_10 = pegar_top_10_gainers(data24)
+                
+                # Log mais informativo
+                print(f"✅ Top 10 Futuros: {', '.join(top_10) if top_10 else 'VAZIO'}")
+                for sym in top_10:
+                    # Tenta mostrar % de alta
+                    for t in data24:
+                        if t.get('symbol') == sym:
+                            change = t.get('priceChangePercent', 'N/A')
+                            print(f"   → {sym}  (+{change}%)")
+                            break
                 sys.stdout.flush()
 
-                for sym in top_5:
+                for sym in top_10:
                     kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines", 
                                            {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
