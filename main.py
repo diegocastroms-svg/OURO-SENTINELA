@@ -2,12 +2,12 @@ import os, asyncio, aiohttp, time, threading, sys
 from datetime import datetime, timedelta
 from flask import Flask
 
-BINANCE = "https://fapi.binance.com"
+BINANCE = "https://api.binance.com"   # ← Mudado para Spot
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-SCAN_INTERVAL = 60   # Mantido em 60s para reduzir risco de ban
+SCAN_INTERVAL = 30   # 30 segundos - mais seguro no Spot
 
 # Controle de estado: "bull", "bear" ou None
 alert_status = {}
@@ -166,16 +166,16 @@ async def analisar_5m(sym, klines):
 
 # ====================== MONITOR LOOP ======================
 async def monitor_loop():
-    print("🚀 Monitoramento FUTUROS iniciado")
+    print("🚀 Monitoramento SPOT iniciado")
     sys.stdout.flush()
-    await send(f"SENTINELA 5M ATIVO EM: {now()}")
+    await send(f"SENTINELA 5M SPOT ATIVO EM: {now()}")
     
     while True:
         print(f"[{now()}] Iniciando ciclo...")
         sys.stdout.flush()
         try:
             async with aiohttp.ClientSession() as s:
-                data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
+                data24 = await get_json(s, f"{BINANCE}/api/v3/ticker/24hr")
                 
                 if not data24:
                     print("❌ Falha ao pegar tickers")
@@ -185,7 +185,7 @@ async def monitor_loop():
 
                 top_25 = pegar_top_25_gainers(data24)
                 
-                print(f"✅ Top 25 Futuros: {', '.join(top_25) if top_25 else 'VAZIO'}")
+                print(f"✅ Top 25 Spot: {', '.join(top_25) if top_25 else 'VAZIO'}")
                 for sym in top_25:
                     for t in data24:
                         if t.get('symbol') == sym:
@@ -195,7 +195,7 @@ async def monitor_loop():
                 sys.stdout.flush()
 
                 for sym in top_25:
-                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines", 
+                    kl_5m = await get_json(s, f"{BINANCE}/api/v3/klines", 
                                            {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
@@ -215,7 +215,7 @@ def start_flask():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    print("Iniciando Sentinela 5M...")
+    print("Iniciando Sentinela 5M Spot...")
     sys.stdout.flush()
     threading.Thread(target=start_flask, daemon=True).start()
     asyncio.run(monitor_loop())
