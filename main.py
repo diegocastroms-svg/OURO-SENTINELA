@@ -9,6 +9,9 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
 
+# 🔥 Controle de estado: alerta SÓ quando o rompimento se forma de novo
+alert_status = {}
+
 app = Flask(__name__)
 
 @app.route("/")
@@ -57,7 +60,6 @@ def par_eh_valido(sym):
         return False
     invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","EUR","USD","BUSD","TUSD","FDUSD","USDC")
     
-    # 🔥 DELISTADAS (não operáveis - bloqueadas permanentemente)
     delistadas = (
         "ALPACA", "A2Z", "BNX", "SXP", "LRC", "RDNT", "NTRN", "IDEX", "FORTH", "OMG", "WAVES", 
         "MKR", "BAL", "BLZ", "FTM", "LINA", "STMX", "NKN", "SC", "BAKE", "RAY", "KLAY", "FTT",
@@ -121,12 +123,21 @@ async def analisar_5m(sym, klines):
     cond4 = bb_superior > bb_superior_prev
     cond5 = closes[-1] >= bb_superior * 0.98
 
-    if cond1 and cond2 and cond3 and cond4 and cond5:
-        nome = sym.replace("USDT", "")
-        msg = f"🚀 SENTINELA 5M\n\n{nome}\nPreço: {last_close:.6f}\nRompimento Bollinger 5M\n{now()}"
-        await send(msg)
-        print(f"✅ ALERTA ENVIADO → {nome}")
-        sys.stdout.flush()
+    condicao_formada = cond1 and cond2 and cond3 and cond4 and cond5
+    nome = sym.replace("USDT", "")
+
+    if condicao_formada:
+        if not alert_status.get(sym, False):           # primeira vez que formou
+            alert_status[sym] = True
+            msg = f"🚀 SENTINELA 5M\n\n{nome}\nPreço: {last_close:.6f}\nRompimento Bollinger 5M\n{now()}"
+            await send(msg)
+            print(f"✅ ALERTA ENVIADO → {nome}")
+            sys.stdout.flush()
+        # se já estava formado → NÃO manda nada (fica em silêncio)
+    else:
+        if alert_status.get(sym, False):               # perdeu o rompimento
+            alert_status[sym] = False
+            print(f"   📉 {nome} perdeu o rompimento (pronto pra novo alerta)")
 
 async def monitor_loop():
     print("🚀 Monitoramento FUTUROS iniciado")
@@ -148,10 +159,8 @@ async def monitor_loop():
 
                 top_10 = pegar_top_10_gainers(data24)
                 
-                # Log mais informativo
                 print(f"✅ Top 10 Futuros: {', '.join(top_10) if top_10 else 'VAZIO'}")
                 for sym in top_10:
-                    # Tenta mostrar % de alta
                     for t in data24:
                         if t.get('symbol') == sym:
                             change = t.get('priceChangePercent', 'N/A')
