@@ -7,7 +7,7 @@ BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-SCAN_INTERVAL = 60
+SCAN_INTERVAL = 60   # Mantido em 60s para reduzir risco de ban
 
 # Controle de estado: "bull", "bear" ou None
 alert_status = {}
@@ -95,7 +95,7 @@ def pegar_top_25_gainers(tickers):
     
     return [moeda['symbol'] for moeda in top_25]
 
-# ====================== NOVA LÓGICA ATUALIZADA ======================
+# ====================== LÓGICA COM TOQUE NA BANDA ======================
 async def analisar_5m(sym, klines):
     closes = [float(k[4]) for k in klines]
     if len(closes) < 30:
@@ -122,18 +122,22 @@ async def analisar_5m(sym, klines):
         bb_upper_prev = bb_middle_prev + (2 * bb_std_prev)
         bb_lower_prev = bb_middle_prev - (2 * bb_std_prev)
         bandwidth_prev = (bb_upper_prev - bb_lower_prev) / bb_middle_prev if bb_middle_prev != 0 else 0
-        boca_abrindo = bandwidth > bandwidth_prev * 1.001   # pequena tolerância contra ruído
+        boca_abrindo = bandwidth > bandwidth_prev * 1.001
     else:
         boca_abrindo = False
 
-    # ====================== CONDIÇÕES ATUALIZADAS ======================
+    # Condições principais
     acima_bb     = last_close > bb_middle
     abaixo_bb    = last_close < bb_middle
     acima_ema    = last_close > ema9[-1]
     abaixo_ema   = last_close < ema9[-1]
 
-    condicao_bull = acima_bb and acima_ema and boca_abrindo
-    condicao_bear = abaixo_bb and abaixo_ema and boca_abrindo
+    # Toque na banda (com pequena tolerância)
+    tocou_banda_superior = last_close >= bb_upper * 0.999
+    tocou_banda_inferior = last_close <= bb_lower * 1.001
+
+    condicao_bull = acima_bb and acima_ema and tocou_banda_superior and boca_abrindo
+    condicao_bear = abaixo_bb and abaixo_ema and tocou_banda_inferior and boca_abrindo
 
     # Controle de estado para evitar alertas repetidos
     status_atual = alert_status.get(sym, None)
@@ -141,7 +145,7 @@ async def analisar_5m(sym, klines):
     if condicao_bull:
         if status_atual != "bull":
             alert_status[sym] = "bull"
-            msg = f"🟢 SENTINELA LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\nAcima BB20 + Acima EMA9 + Bands abrindo\n{now()}"
+            msg = f"🟢 SENTINELA LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\nToque na banda superior + Acima EMA9 + BB abrindo\n{now()}"
             await send(msg)
             print(f"✅ ALERTA LONG ENVIADO → {nome} | Preço: {last_close:.6f}")
             sys.stdout.flush()
@@ -149,13 +153,12 @@ async def analisar_5m(sym, klines):
     elif condicao_bear:
         if status_atual != "bear":
             alert_status[sym] = "bear"
-            msg = f"🔴 SENTINELA SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\nAbaixo BB20 + Abaixo EMA9 + Bands abrindo\n{now()}"
+            msg = f"🔴 SENTINELA SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\nToque na banda inferior + Abaixo EMA9 + BB abrindo\n{now()}"
             await send(msg)
             print(f"✅ ALERTA SHORT ENVIADO → {nome} | Preço: {last_close:.6f}")
             sys.stdout.flush()
 
     else:
-        # Perdeu o padrão → libera para novo alerta futuro
         if status_atual is not None:
             alert_status[sym] = None
             print(f"   📉 {nome} perdeu o padrão (pronto para novo alerta)")
@@ -196,7 +199,7 @@ async def monitor_loop():
                                            {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.2)
 
             print(f"[{now()}] Ciclo finalizado - aguardando {SCAN_INTERVAL}s...\n")
             sys.stdout.flush()
@@ -205,7 +208,7 @@ async def monitor_loop():
         except Exception as e:
             print(f"❌ ERRO: {e}")
             sys.stdout.flush()
-            await asyncio.sleep(10)
+            await asyncio.sleep(15)
 
 def start_flask():
     port = int(os.getenv("PORT", 10000))
