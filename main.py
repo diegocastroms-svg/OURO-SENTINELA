@@ -141,7 +141,7 @@ async def analisar_5m(sym, klines):
     if condicao_bull:
         if status_atual != "bull":
             alert_status[sym] = "bull"
-            msg = f"🚀 BOCA DE JACARÉ LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\nAcima BB20 + Acima EMA9 + Bands abrindo\n{now()}"
+            msg = f"🟢 SENTINELA LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\nAcima BB20 + Acima EMA9 + Bands abrindo\n{now()}"
             await send(msg)
             print(f"✅ ALERTA LONG ENVIADO → {nome} | Preço: {last_close:.6f}")
             sys.stdout.flush()
@@ -149,7 +149,7 @@ async def analisar_5m(sym, klines):
     elif condicao_bear:
         if status_atual != "bear":
             alert_status[sym] = "bear"
-            msg = f"🐻 BOCA DE JACARÉ SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\nAbaixo BB20 + Abaixo EMA9 + Bands abrindo\n{now()}"
+            msg = f"🔴 SENTINELA SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\nAbaixo BB20 + Abaixo EMA9 + Bands abrindo\n{now()}"
             await send(msg)
             print(f"✅ ALERTA SHORT ENVIADO → {nome} | Preço: {last_close:.6f}")
             sys.stdout.flush()
