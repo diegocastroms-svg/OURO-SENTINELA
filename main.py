@@ -1,4 +1,4 @@
-import os, asyncio, aiohttp, time, threading
+import os, asyncio, aiohttp, time, threading, sys
 from datetime import datetime, timedelta
 from flask import Flask
 
@@ -36,10 +36,12 @@ async def get_json(session, url, params=None):
         async with session.get(url, params=params, timeout=15) as r:
             if r.status != 200:
                 print(f"❌ HTTP {r.status} em {url}")
+                sys.stdout.flush()
                 return None
             return await r.json()
     except Exception as e:
         print(f"❌ Erro ao buscar {url}: {e}")
+        sys.stdout.flush()
         return None
 
 def ema(values, period):
@@ -63,9 +65,9 @@ def par_eh_valido(sym):
 
 def pegar_top_5_gainers(tickers):
     if not tickers or not isinstance(tickers, list):
-        print("⚠️ tickers inválido ou vazio")
+        print("⚠️ tickers inválido")
+        sys.stdout.flush()
         return []
-    
     lista_usdt = [
         t for t in tickers
         if isinstance(t, dict) and t.get('symbol','').endswith('USDT') and par_eh_valido(t.get('symbol',''))
@@ -110,46 +112,57 @@ async def analisar_5m(sym, klines):
         msg = f"🚀 SENTINELA 5M\n\n{nome}\nPreço: {last_close:.6f}\nRompimento Bollinger 5M\n{now()}"
         await send(msg)
         print(f"✅ ALERTA ENVIADO → {nome}")
+        sys.stdout.flush()
 
 async def monitor_loop():
-    print("🚀 Monitoramento FUTUROS iniciado")
+    print("🚀 Monitoramento FUTUROS iniciado - Loop principal")
+    sys.stdout.flush()
     await send(f"SENTINELA 5M ATIVO EM: {now()}")
     
     while True:
-        print(f"[{now()}] Iniciando novo ciclo...")
+        print(f"[{now()}] Iniciando ciclo de verificação...")
+        sys.stdout.flush()
         try:
             async with aiohttp.ClientSession() as s:
                 data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
                 
                 if not data24:
                     print("❌ Não conseguiu pegar os tickers")
+                    sys.stdout.flush()
                     await asyncio.sleep(10)
                     continue
 
                 top_5 = pegar_top_5_gainers(data24)
                 print(f"✅ Top 5 Gainers: {', '.join(top_5) if top_5 else 'VAZIO'}")
+                sys.stdout.flush()
 
                 for sym in top_5:
-                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
-                                           {"symbol": sym, "interval": "5m", "limit": 100})
+                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines", {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
                     await asyncio.sleep(0.1)
 
-            print(f"[{now()}] Ciclo finalizado - aguardando {SCAN_INTERVAL}s\n")
+            print(f"[{now()}] Ciclo finalizado - aguardando {SCAN_INTERVAL}s...\n")
+            sys.stdout.flush()
             await asyncio.sleep(SCAN_INTERVAL)
             
         except Exception as e:
             print(f"❌ ERRO NO LOOP: {e}")
+            sys.stdout.flush()
             await asyncio.sleep(10)
 
-def start_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(monitor_loop())
+def start_flask():
+    print("Iniciando Flask em background...")
+    sys.stdout.flush()
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    print("Iniciando aplicação...")
-    threading.Thread(target=start_bot, daemon=True).start()
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    print("Iniciando aplicação - Loop asyncio no thread principal")
+    sys.stdout.flush()
+    
+    # Flask roda em thread secundária
+    threading.Thread(target=start_flask, daemon=True).start()
+    
+    # Loop principal (asyncio) roda no thread principal → logs aparecem
+    asyncio.run(monitor_loop())
