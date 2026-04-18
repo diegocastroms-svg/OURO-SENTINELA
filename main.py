@@ -2,20 +2,19 @@ import os, asyncio, aiohttp, time, threading
 from datetime import datetime, timedelta
 from flask import Flask
 
-BINANCE = "https://api.binance.com"
+BINANCE = "https://fapi.binance.com"   # Alterado para Futuros
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
 MIN_QV_USDT = 5_000_000
-COOLDOWN_15M = 7200   # ← ALTERADO PARA 2 HORAS
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "SENTINELA TREND-VOLUME 15M - ATIVO", 200
+    return "SENTINELA 5M - ATIVO", 200
 
 def now():
     agora_brasilia = datetime.now() - timedelta(hours=3)
@@ -47,13 +46,6 @@ def ema(values, period):
         ema_vals.append(v * k + ema_vals[-1] * (1 - k))
     return ema_vals
 
-def calcular_macd(closes):
-    ema8 = ema(closes, 8)
-    ema17 = ema(closes, 17)
-    macd = [a - b for a, b in zip(ema8, ema17)]
-    signal = ema(macd, 9)
-    return macd, signal
-
 def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper()
     invalid = ("BRL","TRY","GBP","AUD","CAD","CHF","MXN","ZAR","RUB","BKRW","BVND","IDRT",
@@ -66,110 +58,89 @@ def par_eh_valido(sym):
     if sym.endswith(("UPUSDT","DOWNUSDT","BULLUSDT","BEARUSDT")): return False
     return True
 
-_last_signal_time = {}
+# ====================== TOP 5 GAINERS ======================
+def pegar_top_5_gainers(tickers):
+    lista_usdt = [
+        t for t in tickers
+        if t['symbol'].endswith('USDT') and par_eh_valido(t['symbol'])
+    ]
 
-async def analisar_15m(sym, klines):
+    top_5 = sorted(
+        lista_usdt,
+        key=lambda x: float(x.get('priceChangePercent', 0)),
+        reverse=True
+    )[:5]
+
+    return [moeda['symbol'] for moeda in top_5]
+
+
+# ====================== ANALISADOR 5M ======================
+async def analisar_5m(sym, klines):
     closes = [float(k[4]) for k in klines]
-    highs = [float(k[2]) for k in klines]
-    lows = [float(k[3]) for k in klines]
+    if len(closes) < 30:
+        return
 
     ema9 = ema(closes, 9)
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
-
-    ema9_prev = ema9[-2]
-    ema20_prev = ema20[-2]
-    ema9_atual = ema9[-1]
-    ema20_atual = ema20[-1]
-    ema50_atual = ema50[-1]
-
-    macd, signal = calcular_macd(closes)
-    macd_atual = macd[-1]
-    signal_atual = signal[-1]
-
     last_close = closes[-1]
 
-    nome = sym.replace("USDT", "")
-    data_hora_atual = now()
-    key = f"{sym}_15M_SETUP"
-    now_ts = time.time()
-
-    # === Bollinger Bands (20, 1.8) ===
-    tp = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
-    
-    if len(tp) >= 20:
-        middle = sum(tp[-20:]) / 20
-        variance = sum((x - middle) ** 2 for x in tp[-20:]) / 20
-        std = variance ** 0.5
+    if len(closes) >= 20:
+        bb_media = sum(closes[-20:]) / 20
+        bb_std = (sum((x - bb_media) ** 2 for x in closes[-20:]) / 20) ** 0.5
+        bb_superior = bb_media + (2 * bb_std)
     else:
-        middle = tp[-1]
-        std = 0
+        return
 
-    upper = middle + 1.8 * std
-    lower = middle - 1.8 * std
-
-    # === SLOPE CORRIGIDO (agora simples e preciso) ===
-    # Compara com a vela imediatamente anterior (mais intuitivo)
-    if len(tp) >= 21:
-        middle_prev = sum(tp[-21:-1]) / 20
-        variance_prev = sum((x - middle_prev) ** 2 for x in tp[-21:-1]) / 20
-        std_prev = variance_prev ** 0.5
-        upper_prev = middle_prev + 1.8 * std_prev
+    if len(closes) >= 21:
+        bb_media_prev = sum(closes[-21:-1]) / 20
+        bb_std_prev = (sum((x - bb_media_prev) ** 2 for x in closes[-21:-1]) / 20) ** 0.5
+        bb_superior_prev = bb_media_prev + (2 * bb_std_prev)
     else:
-        upper_prev = upper
+        bb_superior_prev = bb_superior
 
-    slope_upper = upper - upper_prev
-    slope_lower = lower - (middle_prev - 1.8 * std_prev) if len(tp) >= 21 else 0
+    cond1 = closes[-1] > bb_media
+    cond2 = (closes[-2] <= ema9[-2] * 1.01 or closes[-3] <= ema9[-3] * 1.01)
+    cond3 = closes[-1] > closes[-2]
+    cond4 = bb_superior > bb_superior_prev
+    cond5 = closes[-1] >= bb_superior * 0.98
 
-    # === LONG ===
-    if (last_close > ema50_atual and
-        abs(ema9_atual - ema20_atual) / ema20_atual < 0.005 and   # ← alterado para 0.5%
-        ema9_atual > ema20_atual and
-        ema20_atual > ema50_atual - (ema50_atual * 0.005) and
-        (ema9_atual - ema20_atual) >= (ema9_prev - ema20_prev) and
-        macd_atual > signal_atual and
-        slope_upper > 0):   # ← slope corrigido
+    if cond1 and cond2 and cond3 and cond4 and cond5:
+        nome = sym.replace("USDT", "")
+        data_hora = now()
+        variacao_ate_bb = (last_close / bb_superior - 1) * 100
 
-        if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
-            _last_signal_time[key] = now_ts
-            msg = f"🚀 LONG 15M\n\n{nome}\nEMAs 9/20 alinhando + Preço > EMA50 + Bollinger superior ↑\nPreço: {last_close:.6f}\n{data_hora_atual}"
-            await send(msg)
+        msg = f"""🚀 SENTINELA 5M - SCALP RÁPIDO
 
-    # === SHORT ===
-    if (last_close < ema50_atual and
-        abs(ema9_atual - ema20_atual) / ema20_atual < 0.005 and   # ← alterado para 0.5%
-        ema9_atual < ema20_atual and
-        ema20_atual < ema50_atual + (ema50_atual * 0.005) and
-        (ema20_atual - ema9_atual) >= (ema20_prev - ema9_prev) and
-        macd_atual < signal_atual and
-        slope_lower < 0):   # ← slope corrigido
+{nome}
+Preço: {last_close:.6f}
+BB Superior: {bb_superior:.6f} ({variacao_ate_bb:+.1f}%)
 
-        if now_ts - _last_signal_time.get(key, 0) > COOLDOWN_15M:
-            _last_signal_time[key] = now_ts
-            msg = f"🔻 SHORT 15M\n\n{nome}\nEMAs 9/20 alinhando + Preço < EMA50 + Bollinger inferior ↓\nPreço: {last_close:.6f}\n{data_hora_atual}"
-            await send(msg)
+✅ Rompimento + Pullback EMA9
+✅ Banda expandindo
+✅ Vela verde
+
+⏱️ Alvo: 2\~3 velas no máximo
+{data_hora}"""
+
+        await send(msg)
+
 
 async def monitor_loop():
-    await send(f"SENTINELA 15M ATIVO EM: {now()}")
+    await send(f"SENTINELA 5M ATIVO EM: {now()}")
     while True:
         try:
             async with aiohttp.ClientSession() as s:
-                data24 = await get_json(s, f"{BINANCE}/api/v3/ticker/24hr")
+                data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
                 if not data24:
                     await asyncio.sleep(5)
                     continue
 
-                for x in data24:
-                    sym = x["symbol"]
-                    if not sym.endswith("USDT") or not par_eh_valido(sym):
-                        continue
+                top_5 = pegar_top_5_gainers(data24)
 
-                    vol24 = float(x.get("quoteVolume", 0))
-                    if vol24 >= MIN_QV_USDT:
-                        kl_15m = await get_json(s, f"{BINANCE}/api/v3/klines",
-                                               {"symbol": sym, "interval": "15m", "limit": 210})
-                        if kl_15m:
-                            await analisar_15m(sym, kl_15m)
+                for sym in top_5:
+                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
+                                           {"symbol": sym, "interval": "5m", "limit": 210})
+                    if kl_5m:
+                        await analisar_5m(sym, kl_5m)
                     await asyncio.sleep(0.05)
 
             await asyncio.sleep(SCAN_INTERVAL)
