@@ -134,7 +134,16 @@ async def monitor_loop():
                     continue
 
                 top_5 = pegar_top_5_gainers(data24)
+                
+                # Log mais informativo
                 print(f"✅ Top 5 Futuros: {', '.join(top_5) if top_5 else 'VAZIO'}")
+                for sym in top_5:
+                    # Tenta mostrar % de alta
+                    for t in data24:
+                        if t.get('symbol') == sym:
+                            change = t.get('priceChangePercent', 'N/A')
+                            print(f"   → {sym}  (+{change}%)")
+                            break
                 sys.stdout.flush()
 
                 for sym in top_5:
