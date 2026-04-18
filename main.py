@@ -2,13 +2,12 @@ import os, asyncio, aiohttp, time, threading
 from datetime import datetime, timedelta
 from flask import Flask
 
-BINANCE = "https://fapi.binance.com"   # Alterado para Futuros
+BINANCE = "https://fapi.binance.com"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 30
-MIN_QV_USDT = 5_000_000
 
 app = Flask(__name__)
 
@@ -58,23 +57,18 @@ def par_eh_valido(sym):
     if sym.endswith(("UPUSDT","DOWNUSDT","BULLUSDT","BEARUSDT")): return False
     return True
 
-# ====================== TOP 5 GAINERS ======================
 def pegar_top_5_gainers(tickers):
     lista_usdt = [
         t for t in tickers
         if t['symbol'].endswith('USDT') and par_eh_valido(t['symbol'])
     ]
-
     top_5 = sorted(
         lista_usdt,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
     )[:5]
-
     return [moeda['symbol'] for moeda in top_5]
 
-
-# ====================== ANALISADOR 5M ======================
 async def analisar_5m(sym, klines):
     closes = [float(k[4]) for k in klines]
     if len(closes) < 30:
@@ -118,30 +112,34 @@ BB Superior: {bb_superior:.6f} ({variacao_ate_bb:+.1f}%)
 ✅ Banda expandindo
 ✅ Vela verde
 
-⏱️ Alvo: 2\~3 velas no máximo
+⏱️ Alvo: 2\~3 velas
 {data_hora}"""
-
         await send(msg)
-
 
 async def monitor_loop():
     await send(f"SENTINELA 5M ATIVO EM: {now()}")
+    print("🚀 Monitoramento iniciado - Futuros USDT")
+    
     while True:
         try:
             async with aiohttp.ClientSession() as s:
                 data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
                 if not data24:
+                    print("Erro ao pegar tickers")
                     await asyncio.sleep(5)
                     continue
 
                 top_5 = pegar_top_5_gainers(data24)
+                
+                # ←←← MOSTRA AS MOEDAS NO LOG (importante)
+                print(f"[{now()}] Top 5 Gainers Futuros: {', '.join(top_5)}")
 
                 for sym in top_5:
                     kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
                                            {"symbol": sym, "interval": "5m", "limit": 210})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.08)
 
             await asyncio.sleep(SCAN_INTERVAL)
         except Exception as e:
