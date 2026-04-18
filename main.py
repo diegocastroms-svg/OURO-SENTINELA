@@ -7,7 +7,7 @@ BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-SCAN_INTERVAL = 30
+SCAN_INTERVAL = 60
 
 # Controle de estado: "bull", "bear" ou None
 alert_status = {}
