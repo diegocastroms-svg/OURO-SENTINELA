@@ -33,9 +33,13 @@ async def send(msg):
 
 async def get_json(session, url, params=None):
     try:
-        async with session.get(url, params=params, timeout=10) as r:
+        async with session.get(url, params=params, timeout=15) as r:
+            if r.status != 200:
+                print(f"❌ HTTP {r.status} em {url}")
+                return None
             return await r.json()
-    except:
+    except Exception as e:
+        print(f"❌ Erro ao buscar {url}: {e}")
         return None
 
 def ema(values, period):
@@ -58,9 +62,13 @@ def par_eh_valido(sym):
     return True
 
 def pegar_top_5_gainers(tickers):
+    if not tickers or not isinstance(tickers, list):
+        print("⚠️ tickers inválido ou vazio")
+        return []
+    
     lista_usdt = [
         t for t in tickers
-        if t['symbol'].endswith('USDT') and par_eh_valido(t['symbol'])
+        if isinstance(t, dict) and t.get('symbol','').endswith('USDT') and par_eh_valido(t.get('symbol',''))
     ]
     top_5 = sorted(
         lista_usdt,
@@ -99,51 +107,40 @@ async def analisar_5m(sym, klines):
 
     if cond1 and cond2 and cond3 and cond4 and cond5:
         nome = sym.replace("USDT", "")
-        data_hora = now()
-        variacao_ate_bb = (last_close / bb_superior - 1) * 100
-
-        msg = f"""🚀 SENTINELA 5M - SCALP RÁPIDO
-
-{nome}
-Preço: {last_close:.6f}
-BB Superior: {bb_superior:.6f} ({variacao_ate_bb:+.1f}%)
-
-✅ Rompimento + Pullback EMA9
-✅ Banda expandindo
-✅ Vela verde
-
-⏱️ Alvo: 2\~3 velas
-{data_hora}"""
+        msg = f"🚀 SENTINELA 5M\n\n{nome}\nPreço: {last_close:.6f}\nRompimento Bollinger 5M\n{now()}"
         await send(msg)
+        print(f"✅ ALERTA ENVIADO → {nome}")
 
 async def monitor_loop():
+    print("🚀 Monitoramento FUTUROS iniciado")
     await send(f"SENTINELA 5M ATIVO EM: {now()}")
-    print("🚀 Monitoramento iniciado - Futuros USDT")
     
     while True:
+        print(f"[{now()}] Iniciando novo ciclo...")
         try:
             async with aiohttp.ClientSession() as s:
                 data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
+                
                 if not data24:
-                    print("Erro ao pegar tickers")
-                    await asyncio.sleep(5)
+                    print("❌ Não conseguiu pegar os tickers")
+                    await asyncio.sleep(10)
                     continue
 
                 top_5 = pegar_top_5_gainers(data24)
-                
-                # ←←← MOSTRA AS MOEDAS NO LOG (importante)
-                print(f"[{now()}] Top 5 Gainers Futuros: {', '.join(top_5)}")
+                print(f"✅ Top 5 Gainers: {', '.join(top_5) if top_5 else 'VAZIO'}")
 
                 for sym in top_5:
                     kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
-                                           {"symbol": sym, "interval": "5m", "limit": 210})
+                                           {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
-                    await asyncio.sleep(0.08)
+                    await asyncio.sleep(0.1)
 
+            print(f"[{now()}] Ciclo finalizado - aguardando {SCAN_INTERVAL}s\n")
             await asyncio.sleep(SCAN_INTERVAL)
+            
         except Exception as e:
-            print(f"Erro no loop: {e}")
+            print(f"❌ ERRO NO LOOP: {e}")
             await asyncio.sleep(10)
 
 def start_bot():
@@ -152,6 +149,7 @@ def start_bot():
     loop.run_until_complete(monitor_loop())
 
 if __name__ == "__main__":
+    print("Iniciando aplicação...")
     threading.Thread(target=start_bot, daemon=True).start()
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
