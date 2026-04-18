@@ -78,7 +78,6 @@ def par_eh_valido(sym):
         return False
     return True
 
-# ====================== ALTERADO ======================
 def pegar_top_25_gainers(tickers):
     if not tickers or not isinstance(tickers, list):
         return []
@@ -96,7 +95,7 @@ def pegar_top_25_gainers(tickers):
     
     return [moeda['symbol'] for moeda in top_25]
 
-# ====================== NOVA LÓGICA ======================
+# ====================== NOVA LÓGICA ATUALIZADA ======================
 async def analisar_5m(sym, klines):
     closes = [float(k[4]) for k in klines]
     if len(closes) < 30:
@@ -115,7 +114,7 @@ async def analisar_5m(sym, klines):
     bb_lower = bb_middle - (2 * bb_std)
     bandwidth = (bb_upper - bb_lower) / bb_middle if bb_middle != 0 else 0
 
-    # Bollinger da vela anterior (para detectar se está abrindo)
+    # Bollinger da vela anterior (para detectar boca abrindo)
     if len(closes) >= 21:
         prev_closes = closes[-21:-1]
         bb_middle_prev = sum(prev_closes) / 20
@@ -123,37 +122,40 @@ async def analisar_5m(sym, klines):
         bb_upper_prev = bb_middle_prev + (2 * bb_std_prev)
         bb_lower_prev = bb_middle_prev - (2 * bb_std_prev)
         bandwidth_prev = (bb_upper_prev - bb_lower_prev) / bb_middle_prev if bb_middle_prev != 0 else 0
-        boca_abrindo = bandwidth > bandwidth_prev * 1.001   # pequena tolerância para evitar ruído
+        boca_abrindo = bandwidth > bandwidth_prev * 1.001   # pequena tolerância contra ruído
     else:
         boca_abrindo = False
 
-    acima_ema = last_close > ema9[-1]
-    abaixo_ema = last_close < ema9[-1]
+    # ====================== CONDIÇÕES ATUALIZADAS ======================
+    acima_bb     = last_close > bb_middle
+    abaixo_bb    = last_close < bb_middle
+    acima_ema    = last_close > ema9[-1]
+    abaixo_ema   = last_close < ema9[-1]
 
-    condicao_bull = acima_ema and boca_abrindo
-    condicao_bear = abaixo_ema and boca_abrindo
+    condicao_bull = acima_bb and acima_ema and boca_abrindo
+    condicao_bear = abaixo_bb and abaixo_ema and boca_abrindo
 
-    # Controle para evitar alertas repetidos
+    # Controle de estado para evitar alertas repetidos
     status_atual = alert_status.get(sym, None)
 
     if condicao_bull:
         if status_atual != "bull":
             alert_status[sym] = "bull"
-            msg = f"🚀 BOCA DE JACARÉ BULL 5M\n\n{nome}\nPreço: {last_close:.6f}\nPreço acima da EMA 9 + Bollinger abrindo\n{now()}"
+            msg = f"🚀 BOCA DE JACARÉ LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\nAcima BB20 + Acima EMA9 + Bands abrindo\n{now()}"
             await send(msg)
-            print(f"✅ ALERTA BULL ENVIADO → {nome} | Preço: {last_close:.6f}")
+            print(f"✅ ALERTA LONG ENVIADO → {nome} | Preço: {last_close:.6f}")
             sys.stdout.flush()
 
     elif condicao_bear:
         if status_atual != "bear":
             alert_status[sym] = "bear"
-            msg = f"🐻 BOCA DE JACARÉ BEAR 5M\n\n{nome}\nPreço: {last_close:.6f}\nPreço abaixo da EMA 9 + Bollinger abrindo\n{now()}"
+            msg = f"🐻 BOCA DE JACARÉ SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\nAbaixo BB20 + Abaixo EMA9 + Bands abrindo\n{now()}"
             await send(msg)
-            print(f"✅ ALERTA BEAR ENVIADO → {nome} | Preço: {last_close:.6f}")
+            print(f"✅ ALERTA SHORT ENVIADO → {nome} | Preço: {last_close:.6f}")
             sys.stdout.flush()
 
     else:
-        # Perdeu o padrão → libera para novo alerta no futuro
+        # Perdeu o padrão → libera para novo alerta futuro
         if status_atual is not None:
             alert_status[sym] = None
             print(f"   📉 {nome} perdeu o padrão (pronto para novo alerta)")
