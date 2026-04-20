@@ -1,15 +1,18 @@
-import os, asyncio, aiohttp, time, threading, sys
+import os, asyncio, aiohttp, time, threading, sys, json, websockets
 from datetime import datetime, timedelta
 from flask import Flask
+from collections import deque
 
 BINANCE = "https://fapi.binance.com"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-SCAN_INTERVAL = 90
+SCAN_INTERVAL = 30
+WINDOW = 300  # 5 minutos
 
 alert_status = {}
+prices = {}
 
 app = Flask(__name__)
 
@@ -37,13 +40,9 @@ async def get_json(session, url, params=None):
     try:
         async with session.get(url, params=params, timeout=15) as r:
             if r.status != 200:
-                print(f"❌ HTTP {r.status} em {url}")
-                sys.stdout.flush()
                 return None
             return await r.json()
-    except Exception as e:
-        print(f"❌ Erro ao buscar {url}: {e}")
-        sys.stdout.flush()
+    except:
         return None
 
 def ema(values, period):
@@ -58,56 +57,58 @@ def par_eh_valido(sym):
     if len(base) < 2:
         return False
 
-    blocked = ("CREAM","PNT","MDX","ALPACA","A2Z","BNX","SXP","LRC","RDNT","NTRN","IDEX","FORTH","OMG","WAVES","MKR","BAL","BLZ","FTM","LINA","STMX","NKN","SC","BAKE","RAY","KLAY","FTT","AMB","LEVER","KEY","COMBO","MDT","OXT","HIFI","GLMR","STRAX","LOOM","BOND","ORBS","STPT","TOKEN","SNT","BADGER","MYRO","OMNI","VOXEL","VIDT","NULS","CHESS","BSW","QUICK","NEIROETH","UXLINK","KDA","PONKE","HIPPO","SLERF","BID","FUN","XCN","EPT","MEMEFI","FIS","MILK","OBOL","OL","RLS","PUFFER","VFY","RVV","42","COMMON","BDXN","TANSSI","ZRC","SKATE","DMC")
-
-    if any(k in base for k in blocked):
-        return False
-
     lixo = ("INU","PEPE","FLOKI","BABY","CAT","DOGE2","SHIB2","MOON","PUP","PUPPY","OLD","NEW")
     if any(k in base for k in lixo):
         return False
     return True
 
-# 🔥 15M REAL OTIMIZADO
-async def pegar_top_10_gainers_15m(session, data24):
-    lista_usdt = [
-        t for t in data24
-        if t.get('symbol','').endswith('USDT')
-        and par_eh_valido(t.get('symbol',''))
-        and float(t.get('quoteVolume', 0)) > 20000000
-    ]
+# ====================== WEBSOCKET ======================
+async def stream_prices():
+    url = "wss://fstream.binance.com/ws/!ticker@arr"
 
-    top_15 = sorted(
-        lista_usdt,
-        key=lambda x: float(x.get('priceChangePercent', 0)),
-        reverse=True
-    )[:15]
+    async with websockets.connect(url) as ws:
+        while True:
+            data = json.loads(await ws.recv())
+            now_ts = time.time()
 
+            for item in data:
+                sym = item['s']
+                if not sym.endswith("USDT"):
+                    continue
+                if not par_eh_valido(sym):
+                    continue
+
+                price = float(item['c'])
+
+                if sym not in prices:
+                    prices[sym] = deque()
+
+                prices[sym].append((now_ts, price))
+
+                # limpa histórico > 5 min
+                while prices[sym] and now_ts - prices[sym][0][0] > WINDOW:
+                    prices[sym].popleft()
+
+# ====================== TOP 10 (5M REAL) ======================
+def calcular_top10_5m():
     variacoes = []
 
-    for moeda in top_15:
-        sym = moeda['symbol']
-
-        klines = await get_json(session, f"{BINANCE}/fapi/v1/klines",
-                                {"symbol": sym, "interval": "15m", "limit": 2})
-
-        await asyncio.sleep(0.5)  # 🔥 evita 429
-
-        if not klines or len(klines) < 2:
+    for sym, hist in prices.items():
+        if len(hist) < 2:
             continue
 
-        open_price = float(klines[-2][1])
-        close_price = float(klines[-1][4])
+        preco_antigo = hist[0][1]
+        preco_atual = hist[-1][1]
 
-        if open_price == 0:
+        if preco_antigo == 0:
             continue
 
-        variacao = ((close_price - open_price) / open_price) * 100
+        variacao = ((preco_atual - preco_antigo) / preco_antigo) * 100
         variacoes.append((sym, variacao))
 
-    top_10 = sorted(variacoes, key=lambda x: x[1], reverse=True)[:10]
+    top10 = sorted(variacoes, key=lambda x: x[1], reverse=True)[:10]
 
-    return [s[0] for s in top_10]
+    return [s[0] for s in top10]
 
 # ====================== LÓGICA ======================
 async def analisar_5m(sym, klines):
@@ -121,6 +122,7 @@ async def analisar_5m(sym, klines):
 
     if len(closes) < 20:
         return
+
     bb_middle = sum(closes[-20:]) / 20
     bb_std = (sum((x - bb_middle) ** 2 for x in closes[-20:]) / 20) ** 0.5
     bb_upper = bb_middle + (2 * bb_std)
@@ -132,8 +134,10 @@ async def analisar_5m(sym, klines):
         bb_std_prev = (sum((x - bb_middle_prev) ** 2 for x in prev_closes) / 20) ** 0.5
         bb_upper_prev = bb_middle_prev + (2 * bb_std_prev)
         bb_lower_prev = bb_middle_prev - (2 * bb_std_prev)
+
         bandwidth_prev = (bb_upper_prev - bb_lower_prev) / bb_middle_prev if bb_middle_prev != 0 else 0
         bandwidth = (bb_upper - bb_lower) / bb_middle if bb_middle != 0 else 0
+
         boca_abrindo = bandwidth > bandwidth_prev * 1.001
     else:
         boca_abrindo = False
@@ -151,62 +155,42 @@ async def analisar_5m(sym, klines):
 
     status_atual = alert_status.get(sym, None)
 
-    if condicao_bull:
-        if status_atual != "bull":
-            alert_status[sym] = "bull"
-            msg = f"🟢 SENTINELA LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\n{now()}"
-            await send(msg)
-            print(f"✅ ALERTA LONG ENVIADO → {nome}")
-            sys.stdout.flush()
+    if condicao_bull and status_atual != "bull":
+        alert_status[sym] = "bull"
+        msg = f"🟢 LONG 5M\n{nome}\n{last_close:.6f}\n{now()}"
+        await send(msg)
 
-    elif condicao_bear:
-        if status_atual != "bear":
-            alert_status[sym] = "bear"
-            msg = f"🔴 SENTINELA SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\n{now()}"
-            await send(msg)
-            print(f"✅ ALERTA SHORT ENVIADO → {nome}")
-            sys.stdout.flush()
-
-    else:
-        if status_atual is not None:
-            alert_status[sym] = None
-            print(f"   📉 {nome} perdeu o padrão")
+    elif condicao_bear and status_atual != "bear":
+        alert_status[sym] = "bear"
+        msg = f"🔴 SHORT 5M\n{nome}\n{last_close:.6f}\n{now()}"
+        await send(msg)
 
 # ====================== MONITOR ======================
 async def monitor_loop():
-    print("🚀 Monitoramento FUTUROS iniciado")
-    sys.stdout.flush()
-    await send(f"SENTINELA 5M FUTUROS ATIVO EM: {now()}")
-
     while True:
-        print(f"[{now()}] Iniciando ciclo...")
+        top10 = calcular_top10_5m()
+
+        print(f"TOP 10 5M: {top10}")
         sys.stdout.flush()
-        try:
-            async with aiohttp.ClientSession() as s:
-                data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
 
-                if not data24:
-                    await asyncio.sleep(10)
-                    continue
+        async with aiohttp.ClientSession() as s:
+            for sym in top10:
+                kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
+                                       {"symbol": sym, "interval": "5m", "limit": 100})
 
-                top_10 = await pegar_top_10_gainers_15m(s, data24)
+                if kl_5m:
+                    await analisar_5m(sym, kl_5m)
 
-                print(f"✅ Top 10 REAL 15M: {', '.join(top_10) if top_10 else 'VAZIO'}")
-                sys.stdout.flush()
+                await asyncio.sleep(0.3)
 
-                for sym in top_10:
-                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
-                                           {"symbol": sym, "interval": "5m", "limit": 100})
-                    if kl_5m:
-                        await analisar_5m(sym, kl_5m)
-                    await asyncio.sleep(0.25)
+        await asyncio.sleep(SCAN_INTERVAL)
 
-            await asyncio.sleep(SCAN_INTERVAL)
-
-        except Exception as e:
-            print(f"❌ ERRO: {e}")
-            sys.stdout.flush()
-            await asyncio.sleep(15)
+# ====================== START ======================
+async def main():
+    await asyncio.gather(
+        stream_prices(),
+        monitor_loop()
+    )
 
 def start_flask():
     port = int(os.getenv("PORT", 10000))
@@ -214,4 +198,4 @@ def start_flask():
 
 if __name__ == "__main__":
     threading.Thread(target=start_flask, daemon=True).start()
-    asyncio.run(monitor_loop())
+    asyncio.run(main())
