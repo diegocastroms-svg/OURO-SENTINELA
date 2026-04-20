@@ -85,7 +85,7 @@ async def pegar_top_10_gainers_15m(session, data24):
 
     variacoes = []
 
-    for moeda in top_20:
+    for moeda in top_15:
         sym = moeda['symbol']
 
         klines = await get_json(session, f"{BINANCE}/fapi/v1/klines",
