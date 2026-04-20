@@ -2,7 +2,7 @@ import os, asyncio, aiohttp, time, threading, sys
 from datetime import datetime, timedelta
 from flask import Flask
 
-BINANCE = "https://api.binance.com"
+BINANCE = "https://fapi.binance.com"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -59,7 +59,6 @@ def par_eh_valido(sym):
     if len(base) < 2:
         return False
 
-    # ==================== MOEDAS BLOQUEADAS ====================
     blocked = ("CREAM", "PNT", "MDX", "ALPACA", "A2Z", "BNX", "SXP", "LRC", "RDNT", 
                "NTRN", "IDEX", "FORTH", "OMG", "WAVES", "MKR", "BAL", "BLZ", "FTM", 
                "LINA", "STMX", "NKN", "SC", "BAKE", "RAY", "KLAY", "FTT", "AMB", 
@@ -78,7 +77,7 @@ def par_eh_valido(sym):
         return False
     return True
 
-def pegar_top_25_gainers(tickers):
+def pegar_top_10_gainers(tickers):
     if not tickers or not isinstance(tickers, list):
         return []
     
@@ -87,15 +86,15 @@ def pegar_top_25_gainers(tickers):
         if isinstance(t, dict) and t.get('symbol','').endswith('USDT') and par_eh_valido(t.get('symbol',''))
     ]
     
-    top_25 = sorted(
+    top_10 = sorted(
         lista_usdt,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
-    )[:25]
+    )[:10]
     
-    return [moeda['symbol'] for moeda in top_25]
+    return [moeda['symbol'] for moeda in top_10]
 
-# ====================== LÓGICA COM TOQUE NA BANDA ======================
+# ====================== LÓGICA ======================
 async def analisar_5m(sym, klines):
     closes = [float(k[4]) for k in klines]
     if len(closes) < 30:
@@ -105,7 +104,6 @@ async def analisar_5m(sym, klines):
     last_close = closes[-1]
     nome = sym.replace("USDT", "")
 
-    # Bollinger 20 atual
     if len(closes) < 20:
         return
     bb_middle = sum(closes[-20:]) / 20
@@ -114,7 +112,6 @@ async def analisar_5m(sym, klines):
     bb_lower = bb_middle - (2 * bb_std)
     bandwidth = (bb_upper - bb_lower) / bb_middle if bb_middle != 0 else 0
 
-    # Bollinger da vela anterior
     if len(closes) >= 21:
         prev_closes = closes[-21:-1]
         bb_middle_prev = sum(prev_closes) / 20
@@ -142,7 +139,7 @@ async def analisar_5m(sym, klines):
     if condicao_bull:
         if status_atual != "bull":
             alert_status[sym] = "bull"
-            msg = f"🟢 SENTINELA LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\nToque na banda superior + Acima EMA9 + BB abrindo\n{now()}"
+            msg = f"🟢 SENTINELA LONG 5M\n\n{nome}\nPreço: {last_close:.6f}\n{now()}"
             await send(msg)
             print(f"✅ ALERTA LONG ENVIADO → {nome}")
             sys.stdout.flush()
@@ -150,7 +147,7 @@ async def analisar_5m(sym, klines):
     elif condicao_bear:
         if status_atual != "bear":
             alert_status[sym] = "bear"
-            msg = f"🔴 SENTINELA SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\nToque na banda inferior + Abaixo EMA9 + BB abrindo\n{now()}"
+            msg = f"🔴 SENTINELA SHORT 5M\n\n{nome}\nPreço: {last_close:.6f}\n{now()}"
             await send(msg)
             print(f"✅ ALERTA SHORT ENVIADO → {nome}")
             sys.stdout.flush()
@@ -160,18 +157,18 @@ async def analisar_5m(sym, klines):
             alert_status[sym] = None
             print(f"   📉 {nome} perdeu o padrão")
 
-# ====================== MONITOR LOOP ======================
+# ====================== MONITOR ======================
 async def monitor_loop():
-    print("🚀 Monitoramento SPOT iniciado")
+    print("🚀 Monitoramento FUTUROS iniciado")
     sys.stdout.flush()
-    await send(f"SENTINELA 5M SPOT ATIVO EM: {now()}")
+    await send(f"SENTINELA 5M FUTUROS ATIVO EM: {now()}")
     
     while True:
         print(f"[{now()}] Iniciando ciclo...")
         sys.stdout.flush()
         try:
             async with aiohttp.ClientSession() as s:
-                data24 = await get_json(s, f"{BINANCE}/api/v3/ticker/24hr")
+                data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
                 
                 if not data24:
                     print("❌ Falha ao pegar tickers")
@@ -179,13 +176,13 @@ async def monitor_loop():
                     await asyncio.sleep(10)
                     continue
 
-                top_25 = pegar_top_25_gainers(data24)
+                top_10 = pegar_top_10_gainers(data24)
                 
-                print(f"✅ Top 25 Spot: {', '.join(top_25) if top_25 else 'VAZIO'}")
+                print(f"✅ Top 10 Futuros: {', '.join(top_10) if top_10 else 'VAZIO'}")
                 sys.stdout.flush()
 
-                for sym in top_25:
-                    kl_5m = await get_json(s, f"{BINANCE}/api/v3/klines", 
+                for sym in top_10:
+                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines", 
                                            {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
@@ -205,7 +202,7 @@ def start_flask():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    print("Iniciando Sentinela 5M Spot...")
+    print("Iniciando Sentinela 5M Futuros...")
     sys.stdout.flush()
     threading.Thread(target=start_flask, daemon=True).start()
     asyncio.run(monitor_loop())
