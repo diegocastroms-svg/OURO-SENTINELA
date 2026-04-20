@@ -68,7 +68,7 @@ def par_eh_valido(sym):
         return False
     return True
 
-# 🔥 NOVA FUNÇÃO (15M REAL)
+# 🔥 15M REAL OTIMIZADO
 async def pegar_top_10_gainers_15m(session, data24):
     lista_usdt = [
         t for t in data24
@@ -77,19 +77,21 @@ async def pegar_top_10_gainers_15m(session, data24):
         and float(t.get('quoteVolume', 0)) > 20000000
     ]
 
-    top_30 = sorted(
+    top_20 = sorted(
         lista_usdt,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
-    )[:30]
+    )[:20]
 
     variacoes = []
 
-    for moeda in top_30:
+    for moeda in top_20:
         sym = moeda['symbol']
 
         klines = await get_json(session, f"{BINANCE}/fapi/v1/klines",
                                 {"symbol": sym, "interval": "15m", "limit": 2})
+
+        await asyncio.sleep(0.2)  # 🔥 evita 429
 
         if not klines or len(klines) < 2:
             continue
@@ -184,12 +186,9 @@ async def monitor_loop():
                 data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
 
                 if not data24:
-                    print("❌ Falha ao pegar tickers")
-                    sys.stdout.flush()
                     await asyncio.sleep(10)
                     continue
 
-                # 🔥 ALTERADO AQUI
                 top_10 = await pegar_top_10_gainers_15m(s, data24)
 
                 print(f"✅ Top 10 REAL 15M: {', '.join(top_10) if top_10 else 'VAZIO'}")
@@ -202,8 +201,6 @@ async def monitor_loop():
                         await analisar_5m(sym, kl_5m)
                     await asyncio.sleep(0.25)
 
-            print(f"[{now()}] Ciclo finalizado - aguardando {SCAN_INTERVAL}s...\n")
-            sys.stdout.flush()
             await asyncio.sleep(SCAN_INTERVAL)
 
         except Exception as e:
@@ -216,7 +213,5 @@ def start_flask():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    print("Iniciando Sentinela 5M Futuros...")
-    sys.stdout.flush()
     threading.Thread(target=start_flask, daemon=True).start()
     asyncio.run(monitor_loop())
