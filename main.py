@@ -77,11 +77,11 @@ async def pegar_top_10_gainers_15m(session, data24):
         and float(t.get('quoteVolume', 0)) > 20000000
     ]
 
-    top_20 = sorted(
+    top_15 = sorted(
         lista_usdt,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
-    )[:20]
+    )[:15]
 
     variacoes = []
 
