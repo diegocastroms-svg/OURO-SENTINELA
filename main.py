@@ -9,7 +9,6 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 SCAN_INTERVAL = 90
 
-# Controle de estado
 alert_status = {}
 
 app = Flask(__name__)
@@ -59,15 +58,7 @@ def par_eh_valido(sym):
     if len(base) < 2:
         return False
 
-    blocked = ("CREAM", "PNT", "MDX", "ALPACA", "A2Z", "BNX", "SXP", "LRC", "RDNT", 
-               "NTRN", "IDEX", "FORTH", "OMG", "WAVES", "MKR", "BAL", "BLZ", "FTM", 
-               "LINA", "STMX", "NKN", "SC", "BAKE", "RAY", "KLAY", "FTT", "AMB", 
-               "LEVER", "KEY", "COMBO", "MDT", "OXT", "HIFI", "GLMR", "STRAX", 
-               "LOOM", "BOND", "ORBS", "STPT", "TOKEN", "SNT", "BADGER", "MYRO", 
-               "OMNI", "VOXEL", "VIDT", "NULS", "CHESS", "BSW", "QUICK", "NEIROETH", 
-               "UXLINK", "KDA", "PONKE", "HIPPO", "SLERF", "BID", "FUN", "XCN", 
-               "EPT", "MEMEFI", "FIS", "MILK", "OBOL", "OL", "RLS", "PUFFER", 
-               "VFY", "RVV", "42", "COMMON", "BDXN", "TANSSI", "ZRC", "SKATE", "DMC")
+    blocked = ("CREAM","PNT","MDX","ALPACA","A2Z","BNX","SXP","LRC","RDNT","NTRN","IDEX","FORTH","OMG","WAVES","MKR","BAL","BLZ","FTM","LINA","STMX","NKN","SC","BAKE","RAY","KLAY","FTT","AMB","LEVER","KEY","COMBO","MDT","OXT","HIFI","GLMR","STRAX","LOOM","BOND","ORBS","STPT","TOKEN","SNT","BADGER","MYRO","OMNI","VOXEL","VIDT","NULS","CHESS","BSW","QUICK","NEIROETH","UXLINK","KDA","PONKE","HIPPO","SLERF","BID","FUN","XCN","EPT","MEMEFI","FIS","MILK","OBOL","OL","RLS","PUFFER","VFY","RVV","42","COMMON","BDXN","TANSSI","ZRC","SKATE","DMC")
 
     if any(k in base for k in blocked):
         return False
@@ -77,22 +68,44 @@ def par_eh_valido(sym):
         return False
     return True
 
-def pegar_top_10_gainers(tickers):
-    if not tickers or not isinstance(tickers, list):
-        return []
-    
+# 🔥 NOVA FUNÇÃO (15M REAL)
+async def pegar_top_10_gainers_15m(session, data24):
     lista_usdt = [
-        t for t in tickers
-        if isinstance(t, dict) and t.get('symbol','').endswith('USDT') and par_eh_valido(t.get('symbol',''))
+        t for t in data24
+        if t.get('symbol','').endswith('USDT')
+        and par_eh_valido(t.get('symbol',''))
+        and float(t.get('quoteVolume', 0)) > 20000000
     ]
-    
-    top_10 = sorted(
+
+    top_30 = sorted(
         lista_usdt,
         key=lambda x: float(x.get('priceChangePercent', 0)),
         reverse=True
-    )[:10]
-    
-    return [moeda['symbol'] for moeda in top_10]
+    )[:30]
+
+    variacoes = []
+
+    for moeda in top_30:
+        sym = moeda['symbol']
+
+        klines = await get_json(session, f"{BINANCE}/fapi/v1/klines",
+                                {"symbol": sym, "interval": "15m", "limit": 2})
+
+        if not klines or len(klines) < 2:
+            continue
+
+        open_price = float(klines[-2][1])
+        close_price = float(klines[-1][4])
+
+        if open_price == 0:
+            continue
+
+        variacao = ((close_price - open_price) / open_price) * 100
+        variacoes.append((sym, variacao))
+
+    top_10 = sorted(variacoes, key=lambda x: x[1], reverse=True)[:10]
+
+    return [s[0] for s in top_10]
 
 # ====================== LÓGICA ======================
 async def analisar_5m(sym, klines):
@@ -110,7 +123,6 @@ async def analisar_5m(sym, klines):
     bb_std = (sum((x - bb_middle) ** 2 for x in closes[-20:]) / 20) ** 0.5
     bb_upper = bb_middle + (2 * bb_std)
     bb_lower = bb_middle - (2 * bb_std)
-    bandwidth = (bb_upper - bb_lower) / bb_middle if bb_middle != 0 else 0
 
     if len(closes) >= 21:
         prev_closes = closes[-21:-1]
@@ -119,14 +131,15 @@ async def analisar_5m(sym, klines):
         bb_upper_prev = bb_middle_prev + (2 * bb_std_prev)
         bb_lower_prev = bb_middle_prev - (2 * bb_std_prev)
         bandwidth_prev = (bb_upper_prev - bb_lower_prev) / bb_middle_prev if bb_middle_prev != 0 else 0
+        bandwidth = (bb_upper - bb_lower) / bb_middle if bb_middle != 0 else 0
         boca_abrindo = bandwidth > bandwidth_prev * 1.001
     else:
         boca_abrindo = False
 
-    acima_bb     = last_close > bb_middle
-    abaixo_bb    = last_close < bb_middle
-    acima_ema    = last_close > ema9[-1]
-    abaixo_ema   = last_close < ema9[-1]
+    acima_bb = last_close > bb_middle
+    abaixo_bb = last_close < bb_middle
+    acima_ema = last_close > ema9[-1]
+    abaixo_ema = last_close < ema9[-1]
 
     tocou_banda_superior = last_close >= bb_upper * 0.999
     tocou_banda_inferior = last_close <= bb_lower * 1.001
@@ -162,27 +175,28 @@ async def monitor_loop():
     print("🚀 Monitoramento FUTUROS iniciado")
     sys.stdout.flush()
     await send(f"SENTINELA 5M FUTUROS ATIVO EM: {now()}")
-    
+
     while True:
         print(f"[{now()}] Iniciando ciclo...")
         sys.stdout.flush()
         try:
             async with aiohttp.ClientSession() as s:
                 data24 = await get_json(s, f"{BINANCE}/fapi/v1/ticker/24hr")
-                
+
                 if not data24:
                     print("❌ Falha ao pegar tickers")
                     sys.stdout.flush()
                     await asyncio.sleep(10)
                     continue
 
-                top_10 = pegar_top_10_gainers(data24)
-                
-                print(f"✅ Top 10 Futuros: {', '.join(top_10) if top_10 else 'VAZIO'}")
+                # 🔥 ALTERADO AQUI
+                top_10 = await pegar_top_10_gainers_15m(s, data24)
+
+                print(f"✅ Top 10 REAL 15M: {', '.join(top_10) if top_10 else 'VAZIO'}")
                 sys.stdout.flush()
 
                 for sym in top_10:
-                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines", 
+                    kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
                                            {"symbol": sym, "interval": "5m", "limit": 100})
                     if kl_5m:
                         await analisar_5m(sym, kl_5m)
@@ -191,7 +205,7 @@ async def monitor_loop():
             print(f"[{now()}] Ciclo finalizado - aguardando {SCAN_INTERVAL}s...\n")
             sys.stdout.flush()
             await asyncio.sleep(SCAN_INTERVAL)
-            
+
         except Exception as e:
             print(f"❌ ERRO: {e}")
             sys.stdout.flush()
