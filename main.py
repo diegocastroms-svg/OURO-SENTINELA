@@ -91,7 +91,7 @@ async def pegar_top_10_gainers_15m(session, data24):
         klines = await get_json(session, f"{BINANCE}/fapi/v1/klines",
                                 {"symbol": sym, "interval": "15m", "limit": 2})
 
-        await asyncio.sleep(0.4)  # 🔥 evita 429
+        await asyncio.sleep(0.5)  # 🔥 evita 429
 
         if not klines or len(klines) < 2:
             continue
