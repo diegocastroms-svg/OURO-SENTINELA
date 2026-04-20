@@ -8,11 +8,9 @@ BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-SCAN_INTERVAL = 30
-WINDOW = 300  # 5 minutos
+SCAN_INTERVAL = 60
 
 alert_status = {}
-prices = {}
 
 app = Flask(__name__)
 
@@ -62,53 +60,29 @@ def par_eh_valido(sym):
         return False
     return True
 
-# ====================== WEBSOCKET ======================
-async def stream_prices():
-    url = "wss://fstream.binance.com/ws/!ticker@arr"
+# 🔥 NOVA FUNÇÃO 24H (IGUAL BINANCE)
+async def pegar_top_24h(session):
+    data24 = await get_json(session, f"{BINANCE}/fapi/v1/ticker/24hr")
 
-    async with websockets.connect(url) as ws:
-        while True:
-            data = json.loads(await ws.recv())
-            now_ts = time.time()
+    if not data24:
+        return []
 
-            for item in data:
-                sym = item['s']
-                if not sym.endswith("USDT"):
-                    continue
-                if not par_eh_valido(sym):
-                    continue
+    lista = [
+        t for t in data24
+        if t.get('symbol','').endswith('USDT')
+        and par_eh_valido(t.get('symbol',''))
+        and float(t.get('quoteVolume', 0)) > 20000000
+    ]
 
-                price = float(item['c'])
+    ordenado = sorted(
+        lista,
+        key=lambda x: float(x.get('priceChangePercent', 0)),
+        reverse=True
+    )
 
-                if sym not in prices:
-                    prices[sym] = deque()
+    top_30 = ordenado[:30]
 
-                prices[sym].append((now_ts, price))
-
-                # limpa histórico > 5 min
-                while prices[sym] and now_ts - prices[sym][0][0] > WINDOW:
-                    prices[sym].popleft()
-
-# ====================== TOP 10 (5M REAL) ======================
-def calcular_top10_5m():
-    variacoes = []
-
-    for sym, hist in prices.items():
-        if len(hist) < 2:
-            continue
-
-        preco_antigo = hist[0][1]
-        preco_atual = hist[-1][1]
-
-        if preco_antigo == 0:
-            continue
-
-        variacao = ((preco_atual - preco_antigo) / preco_antigo) * 100
-        variacoes.append((sym, variacao))
-
-    top10 = sorted(variacoes, key=lambda x: x[1], reverse=True)[:10]
-
-    return [s[0] for s in top10]
+    return [t['symbol'] for t in top_30]
 
 # ====================== LÓGICA ======================
 async def analisar_5m(sym, klines):
@@ -168,29 +142,27 @@ async def analisar_5m(sym, klines):
 # ====================== MONITOR ======================
 async def monitor_loop():
     while True:
-        top10 = calcular_top10_5m()
-
-        print(f"TOP 10 5M: {top10}")
-        sys.stdout.flush()
-
         async with aiohttp.ClientSession() as s:
-            for sym in top10:
+
+            top_lista = await pegar_top_24h(s)
+
+            print(f"TOP 24H: {top_lista}")
+            sys.stdout.flush()
+
+            for sym in top_lista:
                 kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
                                        {"symbol": sym, "interval": "5m", "limit": 100})
 
                 if kl_5m:
                     await analisar_5m(sym, kl_5m)
 
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.5)
 
         await asyncio.sleep(SCAN_INTERVAL)
 
 # ====================== START ======================
 async def main():
-    await asyncio.gather(
-        stream_prices(),
-        monitor_loop()
-    )
+    await monitor_loop()
 
 def start_flask():
     port = int(os.getenv("PORT", 10000))
