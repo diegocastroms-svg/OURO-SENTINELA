@@ -1,14 +1,13 @@
-import os, asyncio, aiohttp, time, threading, sys, json, websockets
+import os, asyncio, aiohttp, time, threading, sys, json
 from datetime import datetime, timedelta
 from flask import Flask
-from collections import deque
 
 BINANCE = "https://fapi.binance.com"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-SCAN_INTERVAL = 60
+SCAN_INTERVAL = 10 # Reduzi para 10s para capturar o toque em tempo real mais rápido
 
 alert_status = {}
 
@@ -44,6 +43,7 @@ async def get_json(session, url, params=None):
         return None
 
 def ema(values, period):
+    if not values: return []
     k = 2 / (period + 1)
     ema_vals = [values[0]]
     for v in values[1:]:
@@ -54,113 +54,97 @@ def par_eh_valido(sym):
     base = sym.replace("USDT", "").upper().strip()
     if len(base) < 2:
         return False
-
     lixo = ("INU","PEPE","FLOKI","BABY","CAT","DOGE2","SHIB2","MOON","PUP","PUPPY","OLD","NEW")
     if any(k in base for k in lixo):
         return False
     return True
 
-# 🔥 NOVA FUNÇÃO 24H (IGUAL BINANCE)
 async def pegar_top_24h(session):
     data24 = await get_json(session, f"{BINANCE}/fapi/v1/ticker/24hr")
-
-    if not data24:
-        return []
-
+    if not data24: return []
     lista = [
         t for t in data24
         if t.get('symbol','').endswith('USDT')
         and par_eh_valido(t.get('symbol',''))
         and float(t.get('quoteVolume', 0)) > 20000000
     ]
-
-    ordenado = sorted(
-        lista,
-        key=lambda x: float(x.get('priceChangePercent', 0)),
-        reverse=True
-    )
-
+    ordenado = sorted(lista, key=lambda x: float(x.get('priceChangePercent', 0)), reverse=True)
     top_30 = ordenado[:30]
-
     return [t['symbol'] for t in top_30]
 
-# ====================== LÓGICA ======================
+# ====================== NOVA LÓGICA DE SETUP ======================
 async def analisar_5m(sym, klines):
-    closes = [float(k[4]) for k in klines]
-    if len(closes) < 30:
-        return
-
-    ema9 = ema(closes, 9)
-    last_close = closes[-1]
+    # klines[-1] é a vela atual (em formação)
+    # klines[-2] é a vela anterior (fechada)
+    
+    fechados = [float(k[4]) for k in klines[:-1]] # Todos os fechados
+    preco_atual = float(klines[-1][4])           # Preço do último tick
+    preco_anterior = float(klines[-2][4])
     nome = sym.replace("USDT", "")
 
-    if len(closes) < 20:
+    if len(fechados) < 200: return
+
+    # 1. CÁLCULO DA EMA 200
+    # Calculamos a EMA considerando o preço atual para ver o cruzamento/proximidade real
+    lista_com_atual = fechados + [preco_atual]
+    ema200_lista = ema(lista_com_atual, 200)
+    ema200_atual = ema200_lista[-1]
+
+    # 2. CÁLCULO DAS BANDAS DE BOLLINGER (20, 2)
+    def calc_bb(data):
+        sma = sum(data[-20:]) / 20
+        std = (sum((x - sma) ** 2 for x in data[-20:]) / 20) ** 0.5
+        return sma + (2 * std), sma - (2 * std)
+
+    bb_up_atual, bb_low_atual = calc_bb(lista_com_atual)
+    bb_up_ant, bb_low_ant = calc_bb(fechados)
+
+    # 3. FILTROS DE DISTÂNCIA E CRUZAMENTO
+    distancia = abs(preco_atual - ema200_atual) / ema200_atual
+    dentro_limite = distancia <= 0.015
+    cruzou_ema = (preco_anterior < ema200_atual <= preco_atual) or (preco_anterior > ema200_atual >= preco_atual)
+
+    if not (dentro_limite or cruzou_ema):
         return
 
-    bb_middle = sum(closes[-20:]) / 20
-    bb_std = (sum((x - bb_middle) ** 2 for x in closes[-20:]) / 20) ** 0.5
-    bb_upper = bb_middle + (2 * bb_std)
-    bb_lower = bb_middle - (2 * bb_std)
-
-    if len(closes) >= 21:
-        prev_closes = closes[-21:-1]
-        bb_middle_prev = sum(prev_closes) / 20
-        bb_std_prev = (sum((x - bb_middle_prev) ** 2 for x in prev_closes) / 20) ** 0.5
-        bb_upper_prev = bb_middle_prev + (2 * bb_std_prev)
-        bb_lower_prev = bb_middle_prev - (2 * bb_std_prev)
-
-        bandwidth_prev = (bb_upper_prev - bb_lower_prev) / bb_middle_prev if bb_middle_prev != 0 else 0
-        bandwidth = (bb_upper - bb_lower) / bb_middle if bb_middle != 0 else 0
-
-        boca_abrindo = bandwidth > bandwidth_prev * 1.001
-    else:
-        boca_abrindo = False
-
-    acima_bb = last_close > bb_middle
-    abaixo_bb = last_close < bb_middle
-    acima_ema = last_close > ema9[-1]
-    abaixo_ema = last_close < ema9[-1]
-
-    tocou_banda_superior = last_close >= bb_upper * 0.999
-    tocou_banda_inferior = last_close <= bb_lower * 1.001
-
-    condicao_bull = acima_bb and acima_ema and tocou_banda_superior and boca_abrindo
-    condicao_bear = abaixo_bb and abaixo_ema and tocou_banda_inferior and boca_abrindo
+    # 4. GATILHOS DE ENTRADA (Mudar para Short/Long sem esperar fechar)
+    
+    # LONG: Preço >= Banda Superior E Banda Superior virando para cima
+    condicao_long = preco_atual >= bb_up_atual and bb_up_atual > bb_up_ant
+    
+    # SHORT: Preço <= Banda Inferior E Banda Inferior virando para baixo
+    condicao_short = preco_atual <= bb_low_atual and bb_low_atual < bb_low_ant
 
     status_atual = alert_status.get(sym, None)
 
-    if condicao_bull and status_atual != "bull":
-        alert_status[sym] = "bull"
-        msg = f"🟢 LONG 5M\n{nome}\n{last_close:.6f}\n{now()}"
+    if condicao_long and status_atual != "long":
+        alert_status[sym] = "long"
+        msg = f"🟢 SENTINELA LONG 5M (Ignição)\n{nome}\nPreço: {preco_atual:.6f}\nDist. EMA: {distancia:.2%}\n{now()}"
         await send(msg)
 
-    elif condicao_bear and status_atual != "bear":
-        alert_status[sym] = "bear"
-        msg = f"🔴 SHORT 5M\n{nome}\n{last_close:.6f}\n{now()}"
+    elif condicao_short and status_atual != "short":
+        alert_status[sym] = "short"
+        msg = f"🔴 SENTINELA SHORT 5M (Ignição)\n{nome}\nPreço: {preco_atual:.6f}\nDist. EMA: {distancia:.2%}\n{now()}"
         await send(msg)
+    
+    # Reset de status se sair da banda para permitir novo alerta futuro
+    elif not condicao_long and not condicao_short:
+        alert_status[sym] = None
 
 # ====================== MONITOR ======================
 async def monitor_loop():
     while True:
         async with aiohttp.ClientSession() as s:
-
             top_lista = await pegar_top_24h(s)
-
-            print(f"TOP 24H: {top_lista}")
-            sys.stdout.flush()
-
             for sym in top_lista:
+                # Limit 201 para garantir cálculo da EMA 200
                 kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
-                                       {"symbol": sym, "interval": "5m", "limit": 100})
-
+                                       {"symbol": sym, "interval": "5m", "limit": 210})
                 if kl_5m:
                     await analisar_5m(sym, kl_5m)
-
-                await asyncio.sleep(0.5)
-
+                await asyncio.sleep(0.2)
         await asyncio.sleep(SCAN_INTERVAL)
 
-# ====================== START ======================
 async def main():
     await monitor_loop()
 
