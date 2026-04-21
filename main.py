@@ -7,9 +7,12 @@ BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-SCAN_INTERVAL = 10 # Reduzi para 10s para capturar o toque em tempo real mais rápido
+SCAN_INTERVAL = 10 
+COOLDOWN_SECONDS = 3600  # Cooldown de 1 hora
 
+# Dicionários de controle
 alert_status = {}
+last_alert_time = {} 
 
 app = Flask(__name__)
 
@@ -72,20 +75,16 @@ async def pegar_top_24h(session):
     top_30 = ordenado[:30]
     return [t['symbol'] for t in top_30]
 
-# ====================== NOVA LÓGICA DE SETUP ======================
+# ====================== LÓGICA DE SETUP ======================
 async def analisar_5m(sym, klines):
-    # klines[-1] é a vela atual (em formação)
-    # klines[-2] é a vela anterior (fechada)
-    
-    fechados = [float(k[4]) for k in klines[:-1]] # Todos os fechados
-    preco_atual = float(klines[-1][4])           # Preço do último tick
+    fechados = [float(k[4]) for k in klines[:-1]] 
+    preco_atual = float(klines[-1][4])           
     preco_anterior = float(klines[-2][4])
     nome = sym.replace("USDT", "")
 
     if len(fechados) < 200: return
 
     # 1. CÁLCULO DA EMA 200
-    # Calculamos a EMA considerando o preço atual para ver o cruzamento/proximidade real
     lista_com_atual = fechados + [preco_atual]
     ema200_lista = ema(lista_com_atual, 200)
     ema200_atual = ema200_lista[-1]
@@ -107,29 +106,27 @@ async def analisar_5m(sym, klines):
     if not (dentro_limite or cruzou_ema):
         return
 
-    # 4. GATILHOS DE ENTRADA (Mudar para Short/Long sem esperar fechar)
-    
-    # LONG: Preço >= Banda Superior E Banda Superior virando para cima
+    # 4. GATILHOS DE ENTRADA
     condicao_long = preco_atual >= bb_up_atual and bb_up_atual > bb_up_ant
-    
-    # SHORT: Preço <= Banda Inferior E Banda Inferior virando para baixo
     condicao_short = preco_atual <= bb_low_atual and bb_low_atual < bb_low_ant
 
-    status_atual = alert_status.get(sym, None)
+    # 5. VERIFICAÇÃO DE COOLDOWN
+    tempo_atual = time.time()
+    ultimo_alerta = last_alert_time.get(sym, 0)
+    em_cooldown = (tempo_atual - ultimo_alerta) < COOLDOWN_SECONDS
 
-    if condicao_long and status_atual != "long":
-        alert_status[sym] = "long"
+    if em_cooldown:
+        return
+
+    if condicao_long:
+        last_alert_time[sym] = tempo_atual
         msg = f"🟢 SENTINELA LONG 5M (Ignição)\n{nome}\nPreço: {preco_atual:.6f}\nDist. EMA: {distancia:.2%}\n{now()}"
         await send(msg)
 
-    elif condicao_short and status_atual != "short":
-        alert_status[sym] = "short"
+    elif condicao_short:
+        last_alert_time[sym] = tempo_atual
         msg = f"🔴 SENTINELA SHORT 5M (Ignição)\n{nome}\nPreço: {preco_atual:.6f}\nDist. EMA: {distancia:.2%}\n{now()}"
         await send(msg)
-    
-    # Reset de status se sair da banda para permitir novo alerta futuro
-    elif not condicao_long and not condicao_short:
-        alert_status[sym] = None
 
 # ====================== MONITOR ======================
 async def monitor_loop():
@@ -137,7 +134,6 @@ async def monitor_loop():
         async with aiohttp.ClientSession() as s:
             top_lista = await pegar_top_24h(s)
             for sym in top_lista:
-                # Limit 201 para garantir cálculo da EMA 200
                 kl_5m = await get_json(s, f"{BINANCE}/fapi/v1/klines",
                                        {"symbol": sym, "interval": "5m", "limit": 210})
                 if kl_5m:
